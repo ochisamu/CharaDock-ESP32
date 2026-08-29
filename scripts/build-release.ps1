@@ -50,6 +50,10 @@ foreach ($privateRoot in $privateRoots) {
 }
 
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $output).Hash.ToLowerInvariant()
-Set-Content -LiteralPath $checksum -Value "$hash  $(Split-Path -Leaf $output)" -Encoding ascii
+[IO.File]::WriteAllText(
+  $checksum,
+  "$hash  $(Split-Path -Leaf $output)`n",
+  [Text.UTF8Encoding]::new($false)
+)
 Write-Host "Created $output"
 Write-Host "Created $checksum"
