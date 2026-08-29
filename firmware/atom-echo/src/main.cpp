@@ -14,7 +14,7 @@
 namespace {
 
 constexpr uint32_t kSerialBaud = 500000;
-constexpr char kFirmwareVersion[] = "0.5.1";
+constexpr char kFirmwareVersion[] = "0.5.2-handsfree-vad-jitterbuf";
 constexpr uint32_t kAudioSampleRate = 16000;
 constexpr uint16_t kDiscoveryPort = 41721;
 constexpr uint16_t kDiscoveryLocalPort = 41723;
@@ -41,8 +41,9 @@ constexpr uint32_t kVadMaximumThresholdRms = 4000;
 constexpr uint32_t kVadStatusIntervalMs = 1000;
 constexpr uint32_t kHandsFreeResumeDelayMs = 350;
 constexpr uint32_t kHandsFreeMaximumUtteranceMs = 30000;
-constexpr size_t kSpeakerPrebufferCapacityBytes = 4096;
-constexpr uint32_t kSpeakerPrebufferMs = 120;
+constexpr size_t kSpeakerPrebufferCapacityBytes = 8192;
+constexpr uint32_t kSpeakerUsbPrebufferMs = 120;
+constexpr uint32_t kSpeakerWifiPrebufferMs = 200;
 constexpr uint32_t kSpeakerDrainMs = 220;
 constexpr uint8_t kProtocolVersion = 1;
 
@@ -265,7 +266,7 @@ bool startAudio(AudioMode mode, uint32_t sampleRate = kAudioSampleRate) {
   config.channel_format = mode == AudioMode::Speaker ? I2S_CHANNEL_FMT_RIGHT_LEFT : I2S_CHANNEL_FMT_ALL_RIGHT;
   config.communication_format = I2S_COMM_FORMAT_I2S;
   config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-  config.dma_buf_count = mode == AudioMode::Speaker ? 12 : 8;
+  config.dma_buf_count = mode == AudioMode::Speaker ? 16 : 8;
   config.dma_buf_len = mode == AudioMode::Speaker ? 256 : 128;
   if (mode == AudioMode::Microphone) {
     config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM);
@@ -288,7 +289,8 @@ bool startAudio(AudioMode mode, uint32_t sampleRate = kAudioSampleRate) {
   }
   audioMode = mode;
   if (mode == AudioMode::Speaker) {
-    const size_t requested = static_cast<size_t>(sampleRate) * sizeof(int16_t) * kSpeakerPrebufferMs / 1000;
+    const uint32_t prebufferMs = playbackTransport == Transport::Wifi ? kSpeakerWifiPrebufferMs : kSpeakerUsbPrebufferMs;
+    const size_t requested = static_cast<size_t>(sampleRate) * sizeof(int16_t) * prebufferMs / 1000;
     speakerPrebufferTargetBytes = min(kSpeakerPrebufferCapacityBytes, max<size_t>(1024, requested));
   }
   return true;
@@ -474,6 +476,7 @@ void beginWifiAttempt() {
   wifiClient.stop();
   wifiHostConnected = false;
   WiFi.disconnect();
+  WiFi.setSleep(false);
   WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
   lastWifiAttemptAt = millis();
   wifiAttemptStartedAt = lastWifiAttemptAt;
@@ -896,6 +899,7 @@ void setup() {
   Serial.begin(kSerialBaud);
   pinMode(kButtonPin, INPUT_PULLUP);
   deviceId = hardwareDeviceId();
+  WiFi.setSleep(false);
   loadWifiConfiguration();
   setState(DeviceState::Connecting);
   delay(120);

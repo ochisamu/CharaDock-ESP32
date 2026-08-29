@@ -53,6 +53,8 @@ Malformed magic, versions, lengths, CRCs, or authentication data must be rejecte
 | `0x7e` | Ack | Both | Bounded flow-control acknowledgement |
 | `0x7f` | Error | Both | Bounded diagnostic message |
 
+During Wi-Fi playback, CharaDock may keep up to six `AudioChunk` frames awaiting acknowledgement. The bounded window hides normal LAN round-trip jitter without allowing an unbounded sender queue. `AudioEnd` is sent only after every outstanding audio acknowledgement has settled.
+
 ## Audio contract
 
 - Microphone: signed PCM16 little-endian, mono, 16 kHz.

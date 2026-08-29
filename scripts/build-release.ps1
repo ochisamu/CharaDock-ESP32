@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [CmdletBinding()]
 param(
-  [string]$Version = "0.5.1"
+  [string]$Version = "0.5.2"
 )
 
 $ErrorActionPreference = "Stop"

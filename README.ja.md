@@ -12,9 +12,9 @@
 | StackChan | 検討中 | 検討中 | 実機到着後に評価予定 |
 | M5Stack RLCD 4.2 | 検討中 | 検討中 | 実機到着後に評価予定 |
 
-デバイス固有のコードを `firmware/<device>` に分け、将来の機種も同じリポジトリと共通ホストプロトコルで管理します。最初の正式版は **M5Stack ATOM Voice（旧名 ATOM Echo、商品コード C008-C）の旧ESP32-PICO-D4版** と、Windows版CharaDock v0.5.0の組み合わせを対象にしています。
+デバイス固有のコードを `firmware/<device>` に分け、将来の機種も同じリポジトリと共通ホストプロトコルで管理します。現行版は **M5Stack ATOM Voice（旧名 ATOM Echo、商品コード C008-C）の旧ESP32-PICO-D4版** と、CharaDock v0.5.1の組み合わせを対象にしています。
 
-> **製品名について:** [スイッチサイエンスの商品ページ](https://www.switch-science.com/products/6347)では、2026年4月に販売名が「ATOM Echo」から「ATOM Voice」へ変更されたと案内されています。商品コードと対応ハードウェアは同じです。CharaDock v0.5.0の画面、プロトコル、ファームウェア名では互換性のため「ATOM Echo」表記を残しています。
+> **製品名について:** [スイッチサイエンスの商品ページ](https://www.switch-science.com/products/6347)では、2026年4月に販売名が「ATOM Echo」から「ATOM Voice」へ変更されたと案内されています。商品コードと対応ハードウェアは同じです。CharaDock v0.5.1の画面、プロトコル、ファームウェア名では互換性のため「ATOM Echo」表記を残しています。
 
 ## できること
 
@@ -31,19 +31,19 @@
 
 ## ビルド済みファームを書き込む
 
-[Releases](https://github.com/ochisamu/CharaDock-ESP32/releases) から `CharaDock-ATOM-Echo-v0.5.1.bin` と `SHA256SUMS.txt` を取得します。チェックサムを確認し、COMポートを解放するためCharaDockを終了してから、結合済みbinをアドレス `0x0` に書き込みます。
+[Releases](https://github.com/ochisamu/CharaDock-ESP32/releases) から `CharaDock-ATOM-Echo-v0.5.2.bin` と `SHA256SUMS.txt` を取得します。チェックサムを確認し、COMポートを解放するためCharaDockを終了してから、結合済みbinをアドレス `0x0` に書き込みます。
 
 ```powershell
 py -m pip install --upgrade esptool
 py -m esptool --chip esp32 --port COM3 erase_flash
-py -m esptool --chip esp32 --port COM3 --baud 460800 write_flash 0x0 .\CharaDock-ATOM-Echo-v0.5.1.bin
+py -m esptool --chip esp32 --port COM3 --baud 460800 write_flash 0x0 .\CharaDock-ATOM-Echo-v0.5.2.bin
 ```
 
 `COM3` は実際のポートへ置き換えてください。`erase_flash` を実行すると、以前保存したWi-Fi情報とペアリング情報も消去されます。
 
 ## CharaDockと接続する
 
-1. [CharaDock v0.5.0以降](https://github.com/ochisamu/CharaDock/releases)を起動します。
+1. [CharaDock v0.5.1以降](https://github.com/ochisamu/CharaDock/releases)を起動します。
 2. **設定 → ESP32デバイス → ATOM Echo** を開きます。
 3. USB接続した状態で有効化し、自動検出されなければCOMポートを選びます。
 4. 無線で使う場合は、USB接続中にPCが接続しているWi-Fi名とパスワードを入力して一度だけ設定します。
@@ -87,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 
 ## 音声品質の設計
 
-デバイスからPCへは16 kHz PCM16 monoで送信します。CharaDockはPC側で音声向けハイパス、ピーク保護、ゲイン、リサンプルを行います。ファームウェアは再生開始前のバッファ、monoサンプルのI2S左右スロット複製、大きめのDMAキュー、停止前のドレインを行います。これにより旧ESP32のmono I2Sで起きる音量・スロット問題を避けます。内蔵0.5〜0.8 W級スピーカーの低音や最大音量には物理的な限界があります。
+デバイスからPCへは16 kHz PCM16 monoで送信します。CharaDockはPC側で音声向けハイパス、ピーク保護、ゲイン、リサンプルを行います。ファームウェアはWi-Fi省電力による周期的な遅延を無効化し、無線再生を約200 ms先読みしてから、拡大したDMAキューへ連続供給します。monoサンプルのI2S左右スロット複製と停止前のドレインも行い、ネットワークのアンダーラン音と旧ESP32のmono I2Sで起きる音量・スロット問題を避けます。内蔵0.5〜0.8 W級スピーカーの低音や最大音量には物理的な限界があります。
 
 ## 通信
 
@@ -104,6 +104,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 
 - **接続待ちのまま:** USBを接続し、CharaDockが起動していることとCOMポートを確認してください。
 - **Wi-Fiに接続できない:** アクセスポイント変更後は再設定します。端末間通信を遮断するゲストWi-Fiは使用できません。
+- **Wi-Fi再生にプツプツ音が入る:** v0.5.2以降へ更新してください。省電力遅延、先読み不足、チャンク単位のACK待ちをまとめて緩和しています。改善しない場合はアクセスポイントとの距離と2.4 GHz帯の混雑を確認します。
 - **近づかないとハンズフリー開始しない:** 画面のRMS／ノイズフロアを見ながら閾値を少しずつ下げます。通常の室内ノイズ以下にはしないでください。
 - **認識後にアンバーのまま:** CharaDockとファームを最新版にし、PCやスマートフォンが別のLive接続を保持していないか確認します。
 - **通常TTSで赤になる:** PCM対応の通常TTSとモデル準備状態を確認します。

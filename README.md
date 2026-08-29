@@ -14,9 +14,9 @@ Voice and character-device firmware for [CharaDock](https://github.com/ochisamu/
 | StackChan | Planned | Planned | Hardware evaluation pending |
 | M5Stack RLCD 4.2 | Planned | Planned | Hardware evaluation pending |
 
-The first release targets the original **M5Stack ATOM Voice (formerly ATOM Echo, product code C008-C) with ESP32-PICO-D4**. It is tested with CharaDock v0.5.0 on Windows.
+The current release targets the original **M5Stack ATOM Voice (formerly ATOM Echo, product code C008-C) with ESP32-PICO-D4**. It is tested with CharaDock v0.5.1.
 
-> **Product-name note:** The [Switch Science product page](https://www.switch-science.com/products/6347) records that the product was renamed from “ATOM Echo” to “ATOM Voice” in April 2026. The product code and supported hardware are unchanged. CharaDock v0.5.0 retains “ATOM Echo” in its UI, protocol, and firmware filenames for compatibility.
+> **Product-name note:** The [Switch Science product page](https://www.switch-science.com/products/6347) records that the product was renamed from “ATOM Echo” to “ATOM Voice” in April 2026. The product code and supported hardware are unchanged. CharaDock v0.5.1 retains “ATOM Echo” in its UI, protocol, and firmware filenames for compatibility.
 
 ## What works
 
@@ -33,21 +33,21 @@ Audio is half-duplex. Wake words, acoustic echo cancellation, public internet re
 
 ## Install the prebuilt firmware
 
-Download `CharaDock-ATOM-Echo-v0.5.1.bin` and `SHA256SUMS.txt` from the [latest GitHub release](https://github.com/ochisamu/CharaDock-ESP32/releases). Verify the checksum, close CharaDock so it releases the COM port, then flash the merged image at address `0x0` with an ESP32 flashing tool.
+Download `CharaDock-ATOM-Echo-v0.5.2.bin` and `SHA256SUMS.txt` from the [latest GitHub release](https://github.com/ochisamu/CharaDock-ESP32/releases). Verify the checksum, close CharaDock so it releases the COM port, then flash the merged image at address `0x0` with an ESP32 flashing tool.
 
 Example with Python and esptool:
 
 ```powershell
 py -m pip install --upgrade esptool
 py -m esptool --chip esp32 --port COM3 erase_flash
-py -m esptool --chip esp32 --port COM3 --baud 460800 write_flash 0x0 .\CharaDock-ATOM-Echo-v0.5.1.bin
+py -m esptool --chip esp32 --port COM3 --baud 460800 write_flash 0x0 .\CharaDock-ATOM-Echo-v0.5.2.bin
 ```
 
 Replace `COM3` with the port assigned on your PC. Erasing flash also removes previously stored Wi-Fi credentials and pairing data.
 
 ## Connect it to CharaDock
 
-1. Install and start [CharaDock v0.5.0 or later](https://github.com/ochisamu/CharaDock/releases).
+1. Install and start [CharaDock v0.5.1 or later](https://github.com/ochisamu/CharaDock/releases).
 2. Open **Settings → ESP32 devices → ATOM Echo**.
 3. Connect the device by USB, enable it, and select its COM port if automatic detection does not find it.
 4. To use wireless audio, enter the PC's current Wi-Fi name and password while USB is connected, then run provisioning once.
@@ -97,7 +97,7 @@ Outputs are written to `dist/` with a SHA-256 manifest. Generated firmware and b
 
 ## Audio design
 
-The device sends 16 kHz PCM16 mono. CharaDock applies a speech-focused high-pass filter, peak protection, gain, and resampling on the PC. Firmware prebuffers speaker data, duplicates each mono sample into both I2S slots, uses a larger DMA queue, and drains the queue before stopping I2S. This avoids the original ESP32 mono-I2S level/slot issue and makes speech clearer without pretending the 0.5–0.8 W micro-speaker can reproduce bass.
+The device sends 16 kHz PCM16 mono. CharaDock applies a speech-focused high-pass filter, peak protection, gain, and resampling on the PC. Firmware disables periodic Wi-Fi power-save latency, prebuffers about 200 ms for wireless playback, duplicates each mono sample into both I2S slots, uses a larger DMA queue, and drains the queue before stopping I2S. This avoids network underrun clicks and the original ESP32 mono-I2S level/slot issue without pretending the 0.5–0.8 W micro-speaker can reproduce bass.
 
 ## Network and protocol
 
@@ -114,6 +114,7 @@ Wireless sessions authenticate the provisioned device ID using an HMAC-SHA256 ch
 
 - **The device remains dim or connecting:** keep USB attached, confirm CharaDock is running, and reselect the COM port.
 - **Wi-Fi never connects:** provision again after changing access points; both devices must be on a LAN that permits peer traffic.
+- **Wi-Fi playback clicks or crackles:** update to v0.5.2 or later. It removes power-save latency, adds more prebuffering, and works with CharaDock's pipelined audio acknowledgements. If it persists, check distance from the access point and 2.4 GHz congestion.
 - **Hands-free starts only at close range:** lower the threshold gradually while watching the live RMS/noise-floor display. Avoid setting it below normal room noise.
 - **Amber never returns to green:** update both CharaDock and this firmware. Stop any PC/phone Live session that owns the shared Realtime route, then retry.
 - **Standard TTS shows red:** select a PCM-capable non-system TTS provider and confirm its model is ready.
