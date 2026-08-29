@@ -8,11 +8,13 @@
 
 | デバイス | 入力 | 出力 | 状況 |
 | --- | --- | --- | --- |
-| M5Stack ATOM Echo（旧ESP32版） | ボタン／ハンズフリーVAD | 内蔵スピーカー＋RGB LED | 対応済み |
+| M5Stack ATOM Voice（旧名 ATOM Echo、C008-C） | ボタン／ハンズフリーVAD | 内蔵スピーカー＋RGB LED | 対応済み |
 | StackChan | 検討中 | 検討中 | 実機到着後に評価予定 |
 | M5Stack RLCD 4.2 | 検討中 | 検討中 | 実機到着後に評価予定 |
 
-デバイス固有のコードを `firmware/<device>` に分け、将来の機種も同じリポジトリと共通ホストプロトコルで管理します。最初の正式版は **M5Stack ATOM Echo / ATOM Voice C008-Cの旧ESP32-PICO-D4版** と、Windows版CharaDock v0.5.0の組み合わせを対象にしています。
+デバイス固有のコードを `firmware/<device>` に分け、将来の機種も同じリポジトリと共通ホストプロトコルで管理します。最初の正式版は **M5Stack ATOM Voice（旧名 ATOM Echo、商品コード C008-C）の旧ESP32-PICO-D4版** と、Windows版CharaDock v0.5.0の組み合わせを対象にしています。
+
+> **製品名について:** [スイッチサイエンスの商品ページ](https://www.switch-science.com/products/6347)では、2026年4月に販売名が「ATOM Echo」から「ATOM Voice」へ変更されたと案内されています。商品コードと対応ハードウェアは同じです。CharaDock v0.5.0の画面、プロトコル、ファームウェア名では互換性のため「ATOM Echo」表記を残しています。
 
 ## できること
 

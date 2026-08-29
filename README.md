@@ -10,11 +10,13 @@ Voice and character-device firmware for [CharaDock](https://github.com/ochisamu/
 
 | Device | Input | Output / display | Status |
 | --- | --- | --- | --- |
-| M5Stack ATOM Echo (original ESP32) | Button or hands-free VAD | Built-in speaker + RGB LED | Supported |
+| M5Stack ATOM Voice (formerly ATOM Echo, C008-C) | Button or hands-free VAD | Built-in speaker + RGB LED | Supported |
 | StackChan | Planned | Planned | Hardware evaluation pending |
 | M5Stack RLCD 4.2 | Planned | Planned | Hardware evaluation pending |
 
-The first release targets the original **M5Stack ATOM Echo / ATOM Voice C008-C with ESP32-PICO-D4**. It is tested with CharaDock v0.5.0 on Windows.
+The first release targets the original **M5Stack ATOM Voice (formerly ATOM Echo, product code C008-C) with ESP32-PICO-D4**. It is tested with CharaDock v0.5.0 on Windows.
+
+> **Product-name note:** The [Switch Science product page](https://www.switch-science.com/products/6347) records that the product was renamed from “ATOM Echo” to “ATOM Voice” in April 2026. The product code and supported hardware are unchanged. CharaDock v0.5.0 retains “ATOM Echo” in its UI, protocol, and firmware filenames for compatibility.
 
 ## What works
 
