@@ -9,10 +9,10 @@
 | デバイス | 入力 | 出力 | 状況 |
 | --- | --- | --- | --- |
 | M5Stack ATOM Voice（旧名 ATOM Echo、C008-C） | ボタン／ハンズフリーVAD | 内蔵スピーカー＋RGB LED | 対応済み |
-| StackChan | 検討中 | 検討中 | 実機到着後に評価予定 |
-| M5Stack RLCD 4.2 | 検討中 | 検討中 | 実機到着後に評価予定 |
+| M5Stack StackChan K151 | 頭部タッチ／PTT先行実装 | 画面／RGB／サーボ先行実装 | CoreS3ファーム実装中・実機検証待ち |
+| Waveshare ESP32-S3-RLCD-4.2 | KEY PTT／ハンズフリーVAD／BOOT診断 | 400×300モノクロ画面＋内蔵スピーカー | Protocol v2のUSB／Wi-Fi・マイク・スピーカー・画面preview |
 
-デバイス固有のコードを `firmware/<device>` に分け、将来の機種も同じリポジトリと共通ホストプロトコルで管理します。現行版は **M5Stack ATOM Voice（旧名 ATOM Echo、商品コード C008-C）の旧ESP32-PICO-D4版** と、CharaDock v0.5.1の組み合わせを対象にしています。
+デバイス固有のコードを `firmware/<device>` に分け、将来の機種も同じリポジトリと共通ホストプロトコルで管理します。現行の安定版は **M5Stack ATOM Voice（旧名 ATOM Echo、商品コード C008-C）の旧ESP32-PICO-D4版** と、CharaDock v0.5.1の組み合わせを対象にしています。StackChan K151とWaveshare RLCD 4.2の実装はそれぞれ独立したディレクトリに分離し、既存ATOM用protocol v1を変更しません。RLCD 4.2にはST7305表示、5種類の原子的な画面、東雲12／16 px日本語フォント、漫画調ポートレート転送、物理操作、RTC・温湿度・電池診断、ES7210マイク入力、ES8311スピーカー再生、USB／認証付きWi-FiのDevice Protocol v2を実装しました。Chat／Work、音声認識、通常TTS、GPT-Live、BeatriceはPC版CharaDockが担当し、RLCDファームはPCMと画面状態だけを送受信します。端末内TTSエンジンやモデルは含みません。
 
 > **製品名について:** [スイッチサイエンスの商品ページ](https://www.switch-science.com/products/6347)では、2026年4月に販売名が「ATOM Echo」から「ATOM Voice」へ変更されたと案内されています。商品コードと対応ハードウェアは同じです。CharaDock v0.5.1の画面、プロトコル、ファームウェア名では互換性のため「ATOM Echo」表記を残しています。
 
@@ -52,7 +52,7 @@ py -m esptool --chip esp32 --port COM3 --baud 460800 write_flash 0x0 .\CharaDock
 
 Wi-Fiパスワードとランダムなペアリング鍵はESP32のNVSに保存され、PCへ読み戻されません。信頼できるプライベートLAN専用です。ルーターでポートを外部公開しないでください。
 
-通常TTSではIrodori TTSなどPCMを生成できる音声を選んでください。Windowsシステム音声はATOM Echoへ転送できません。GPT-LiveにはCodex app-server接続が必要です。ATOM EchoのLiveだけを最後の会話から5分で終了するオプションもありますが、初期状態はOFFです。
+通常TTSではIrodori TTSなどPCMを生成できる音声を選んでください。Windowsシステム音声はATOM Echoへ転送できません。GPT-LiveにはCodex app-server接続が必要です。ATOM EchoのLiveだけを最後の会話から5分で終了するオプションもあり、初期状態はOFFです。
 
 ## LEDと操作
 
@@ -69,12 +69,18 @@ Wi-Fiパスワードとランダムなペアリング鍵はESP32のNVSに保存�
 
 ## ソースからビルド
 
-Python 3.10以降と[PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html)を用意します。依存バージョンは [`firmware/atom-echo/platformio.ini`](./firmware/atom-echo/platformio.ini) に固定しています。
+Python 3.10以降と[PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html)を用意します。依存バージョンは各デバイスの `platformio.ini` に個別に固定しています。RLCDのArduino-ESP32 3.x package cacheはM5系ターゲットの2.x cacheから分離しているため、StackChanやATOMのビルドがRLCDのtoolchainを置き換えません。
 
 ```powershell
 pio run --project-dir firmware/atom-echo
 pio run --project-dir firmware/atom-echo --target upload --upload-port COM3
 pio device monitor --port COM3 --baud 500000
+
+# StackChan K151 / CoreS3の先行実装をビルド
+pio run --project-dir firmware/stackchan
+
+# Waveshare ESP32-S3-RLCD-4.2の表示／マイク／音声／Wi-Fiファームをビルド
+pio run --project-dir firmware/waveshare-rlcd-4.2
 ```
 
 配布用の結合済みbinは次のコマンドで作成できます。
@@ -85,9 +91,29 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 
 成果物とSHA-256一覧は `dist/` に生成され、Git管理からは除外されます。
 
+StackChanの結合済みpreviewイメージは、正式対応済みATOMの成果物を置き換えないよう別スクリプトで生成します。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  .\scripts\build-stackchan-release.ps1 `
+  -Version 0.1.0-preview
+```
+
+`dist\stackchan` に、bootloaderとpartitionを含むアドレス`0x0`書き込み用binとSHA-256一覧が生成されます。
+
+RLCD 4.2も正式対応済みATOMの成果物を置き換えないpreview用スクリプトで、アドレス`0x0`書き込み用binとSHA-256一覧を生成します。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  .\scripts\build-rlcd42-release.ps1 `
+  -Version 0.2.0-preview
+```
+
+RLCD接続には使用中経路のheartbeat、最終キャラクターを残すOffline画面、上限付き再接続backoff、再接続後の完全Snapshot復元、16 kHzマイク入力、512 KiB PSRAMに先読みするPC生成音声の再生を含みます。初回Wi-Fi設定にはUSBを使い、相互HMACペアリング後もUSBをフォールバックとして残します。書き込み、起動診断、漫画調ポートレート、マイク、Wi-Fi、スピーカーの確認は [`firmware/waveshare-rlcd-4.2/README.md`](./firmware/waveshare-rlcd-4.2/README.md) を参照してください。
+
 ## 音声品質の設計
 
-デバイスからPCへは16 kHz PCM16 monoで送信します。CharaDockはPC側で音声向けハイパス、ピーク保護、ゲイン、リサンプルを行います。ファームウェアはWi-Fi省電力による周期的な遅延を無効化し、無線再生を約200 ms先読みしてから、拡大したDMAキューへ連続供給します。monoサンプルのI2S左右スロット複製と停止前のドレインも行い、ネットワークのアンダーラン音と旧ESP32のmono I2Sで起きる音量・スロット問題を避けます。内蔵0.5〜0.8 W級スピーカーの低音や最大音量には物理的な限界があります。
+デバイスからPCへは16 kHz PCM16 monoで送信します。音声認識、音声合成、必要なLive／Beatrice処理、保護、リサンプルはPC側で行い、PCMを端末へ戻します。ATOM用の小型スピーカーDSPは維持しつつ、RLCDは別のほぼ等倍プロファイル（100 Hzの軽いハイパスと最終リミッターのみ）に分け、ES8311経路へATOM固有の減衰や強い圧縮をかけません。ファームウェアはWi-Fi省電力を無効化し、PSRAM先読み、ACK付きフロー制御、停止前ドレインを行います。
 
 ## 通信
 
@@ -98,7 +124,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 | 認証・制御・PCM | TCP 41722 |
 | USB設定／フォールバック | Serial 500000 baud |
 
-無線接続では、設定済みデバイスIDとHMAC-SHA256チャレンジで認証します。フレームには固定ヘッダー、シーケンス、長さ制限、CRC-32があり、スピーカーチャンクにはACKを返します。詳細は [docs/protocol.md](./docs/protocol.md) を参照してください。
+無線接続では、設定済み256-bit鍵でHMAC-SHA256の相互認証を行います。CharaDockがRLCDの応答を検証し、RLCDもPCの証明を確認してから制御・PCMを受け付けます。フレームには固定ヘッダー、シーケンス、長さ制限、CRC-32があり、スピーカーチャンクにはACKを返します。詳細は [docs/protocol.md](./docs/protocol.md) を参照してください。
 
 ## トラブルシューティング
 
@@ -113,8 +139,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 
 ## セキュリティとプライバシー
 
-Wi-Fiパスワード、ペアリング鍵、APIキー、ユーザー固有パス、ローカルログはリポジトリにも配布binにも含めません。クラウド接続と料金はPC版CharaDockの設定に従い、このファームウェアがOpenAIへ直接接続することはありません。
+Wi-Fiパスワード、ペアリング鍵、APIキー、ユーザー固有パス、ローカルログはリポジトリにも配布binにも含めません。クラウド接続と料金はPC版CharaDockの設定に従います。このファームウェアにはsanoTTS／Open JTalkのモデルもクラウド認証情報もなく、OpenAIへ直接接続しません。
 
 ## ライセンス
 
-本リポジトリのソースコードは [Apache License 2.0](./LICENSE) です。PlatformIOが取得する外部ライブラリにはそれぞれのライセンスが適用されます。
+本リポジトリのソースコードは [Apache License 2.0](./LICENSE) です。PlatformIOが取得する外部ライブラリと同梱フォントにはそれぞれのライセンスが適用されます。詳細は [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) に記載しています。

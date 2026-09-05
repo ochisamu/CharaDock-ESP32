@@ -11,10 +11,10 @@ Voice and character-device firmware for [CharaDock](https://github.com/ochisamu/
 | Device | Input | Output / display | Status |
 | --- | --- | --- | --- |
 | M5Stack ATOM Voice (formerly ATOM Echo, C008-C) | Button or hands-free VAD | Built-in speaker + RGB LED | Supported |
-| StackChan | Planned | Planned | Hardware evaluation pending |
-| M5Stack RLCD 4.2 | Planned | Planned | Hardware evaluation pending |
+| M5Stack StackChan K151 | Head touch / PTT vertical slice | Display / RGB / servo vertical slice | CoreS3 firmware implemented; physical validation pending |
+| Waveshare ESP32-S3-RLCD-4.2 | KEY PTT / hands-free VAD / BOOT diagnostics | 400×300 monochrome display + onboard speaker | Protocol-v2 USB/Wi-Fi, microphone, speaker, and display preview |
 
-The current release targets the original **M5Stack ATOM Voice (formerly ATOM Echo, product code C008-C) with ESP32-PICO-D4**. It is tested with CharaDock v0.5.1.
+The current stable release targets the original **M5Stack ATOM Voice (formerly ATOM Echo, product code C008-C) with ESP32-PICO-D4**. It is tested with CharaDock v0.5.1. The StackChan K151 and Waveshare RLCD 4.2 implementations are isolated in their own directories and do not change the existing ATOM protocol-v1 target. RLCD 4.2 adds the ST7305 display, five atomic UI scenes, Japanese fonts, manga-oriented portrait transfer, physical controls, RTC/environment/battery diagnostics, ES7210 microphone capture, ES8311 speaker playback, and Device Protocol v2 over USB or authenticated Wi-Fi. CharaDock on the PC owns Chat/Work, speech recognition, standard TTS, GPT-Live, and Beatrice; the RLCD firmware only exchanges PCM and presentation state and contains no local TTS engine or model.
 
 > **Product-name note:** The [Switch Science product page](https://www.switch-science.com/products/6347) records that the product was renamed from “ATOM Echo” to “ATOM Voice” in April 2026. The product code and supported hardware are unchanged. CharaDock v0.5.1 retains “ATOM Echo” in its UI, protocol, and firmware filenames for compatibility.
 
@@ -56,7 +56,7 @@ Replace `COM3` with the port assigned on your PC. Erasing flash also removes pre
 
 The Wi-Fi password and a random pairing secret are stored in ESP32 NVS. The password is not returned to the PC. Wireless mode is intended for a trusted private LAN; do not forward its ports to the public internet.
 
-For standard TTS, choose a PCM-capable character voice such as Irodori TTS; Windows system speech cannot be forwarded as PCM. GPT-Live requires the Codex app-server connection. CharaDock can optionally close only the ATOM Echo Live session five minutes after the last conversation; this option is off by default.
+For standard TTS, choose a PCM-capable character voice such as Irodori TTS; Windows system speech cannot be forwarded as PCM. GPT-Live requires the Codex app-server connection. CharaDock closes an idle ESP32-device Live session five minutes after the last conversation by default; USB/Wi-Fi remains connected and the next long press reconnects Live automatically. Recording and response playback suspend the timer.
 
 ## Controls and LED states
 
@@ -79,12 +79,18 @@ Requirements:
 - Python 3.10 or later
 - [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html)
 
-The environment and library versions are pinned in [`firmware/atom-echo/platformio.ini`](./firmware/atom-echo/platformio.ini).
+The environment and library versions are pinned independently in each device's `platformio.ini`. The RLCD Arduino-ESP32 3.x package cache is isolated from the M5 targets' Arduino-ESP32 2.x cache, so building StackChan or ATOM cannot replace the RLCD toolchain.
 
 ```powershell
 pio run --project-dir firmware/atom-echo
 pio run --project-dir firmware/atom-echo --target upload --upload-port COM3
 pio device monitor --port COM3 --baud 500000
+
+# StackChan K151 / CoreS3 bring-up build
+pio run --project-dir firmware/stackchan
+
+# Waveshare ESP32-S3-RLCD-4.2 display / microphone / audio / Wi-Fi build
+pio run --project-dir firmware/waveshare-rlcd-4.2
 ```
 
 To create the same merged binary used for releases:
@@ -93,11 +99,29 @@ To create the same merged binary used for releases:
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 ```
 
+StackChan preview images use a separate script so the supported ATOM release is not replaced:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  .\scripts\build-stackchan-release.ps1 `
+  -Version 0.1.0-preview
+```
+
 Outputs are written to `dist/` with a SHA-256 manifest. Generated firmware and build folders are intentionally excluded from Git.
+
+RLCD 4.2 uses the same preview-only separation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  .\scripts\build-rlcd42-release.ps1 `
+  -Version 0.2.0-preview
+```
+
+The RLCD profile includes active-route heartbeat detection, a last-character Offline screen, bounded reconnect backoff, complete Snapshot restoration after reconnect, 16 kHz microphone capture, and PC-generated speech playback buffered in 512 KiB of PSRAM. USB is used for first-time Wi-Fi provisioning and remains a fallback after mutual-HMAC pairing. See [`firmware/waveshare-rlcd-4.2/README.md`](./firmware/waveshare-rlcd-4.2/README.md) for flashing, diagnostics, sample scenes, manga portrait transfer, microphone, Wi-Fi, and speaker checks.
 
 ## Audio design
 
-The device sends 16 kHz PCM16 mono. CharaDock applies a speech-focused high-pass filter, peak protection, gain, and resampling on the PC. Firmware disables periodic Wi-Fi power-save latency, prebuffers about 200 ms for wireless playback, duplicates each mono sample into both I2S slots, uses a larger DMA queue, and drains the queue before stopping I2S. This avoids network underrun clicks and the original ESP32 mono-I2S level/slot issue without pretending the 0.5–0.8 W micro-speaker can reproduce bass.
+Devices send 16 kHz PCM16 mono to the PC. CharaDock performs recognition, synthesis, optional Live/Beatrice processing, protection, and resampling before returning PCM. The ATOM profile keeps its speech-focused small-speaker DSP. RLCD uses a separate near-unity profile with only a light 100 Hz high-pass and final limiter, avoiding ATOM-specific attenuation and compression on the ES8311 path. Firmware disables Wi-Fi power save, buffers playback in PSRAM, uses bounded flow control, and drains accepted audio before disabling I2S.
 
 ## Network and protocol
 
@@ -108,7 +132,7 @@ The device sends 16 kHz PCM16 mono. CharaDock applies a speech-focused high-pass
 | Authenticated control + PCM | TCP 41722 |
 | USB setup / fallback | Serial 500000 baud |
 
-Wireless sessions authenticate the provisioned device ID using an HMAC-SHA256 challenge. Frames include a fixed header, sequence, bounded payload, and CRC-32; speaker chunks use acknowledgements for flow control. See [docs/protocol.md](./docs/protocol.md) for the wire format.
+Wireless sessions use a 256-bit provisioned secret for mutual HMAC-SHA256 authentication: CharaDock verifies the RLCD response, and the RLCD verifies the host proof before accepting control or PCM. Frames include a fixed header, sequence, bounded payload, and CRC-32; speaker chunks use acknowledgements for flow control. See [docs/protocol.md](./docs/protocol.md) for the wire format.
 
 ## Troubleshooting
 
@@ -126,18 +150,25 @@ Wireless sessions authenticate the provisioned device ID using an HMAC-SHA256 ch
 ```text
 firmware/
   atom-echo/       PlatformIO project for the supported ATOM Echo
+  stackchan/       PlatformIO project for StackChan K151 bring-up
+  waveshare-rlcd-4.2/
+                   PlatformIO project for RLCD 4.2 bring-up
+shared/
+  protocol-v2/     Device-neutral frame codec shared by new targets
 docs/
   protocol.md      Shared CharaDock ESP32 host protocol
 scripts/
   build-release.ps1
+  build-stackchan-release.ps1
+  build-rlcd42-release.ps1
 ```
 
 New devices should get their own `firmware/<device>` project and reuse the documented host concepts. Device capabilities must be reported explicitly; the PC UI should reveal only controls that device actually supports.
 
 ## Security and privacy
 
-No Wi-Fi password, pairing token, API key, user path, or local log is committed to this repository or embedded in release images. Provisioned credentials remain in the device's NVS until erased or replaced. Conversation services and costs are determined by the CharaDock PC settings; this firmware does not contain cloud credentials and never connects directly to OpenAI.
+No Wi-Fi password, pairing token, API key, user path, or local log is committed to this repository or embedded in release images. Provisioned credentials remain in the device's NVS until erased or replaced. Conversation services and costs are determined by the CharaDock PC settings; this firmware contains no sanoTTS/Open JTalk model, no cloud credentials, and never connects directly to OpenAI.
 
 ## License
 
-Source code in this repository is licensed under [Apache License 2.0](./LICENSE). Third-party libraries retain their own licenses and are resolved by PlatformIO during the build.
+Source code in this repository is licensed under [Apache License 2.0](./LICENSE). Third-party libraries retain their own licenses and are resolved by PlatformIO during the build; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

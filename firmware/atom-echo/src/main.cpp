@@ -14,7 +14,7 @@
 namespace {
 
 constexpr uint32_t kSerialBaud = 500000;
-constexpr char kFirmwareVersion[] = "0.5.2-handsfree-vad-jitterbuf";
+constexpr char kFirmwareVersion[] = "0.6.0";
 constexpr uint32_t kAudioSampleRate = 16000;
 constexpr uint16_t kDiscoveryPort = 41721;
 constexpr uint16_t kDiscoveryLocalPort = 41723;

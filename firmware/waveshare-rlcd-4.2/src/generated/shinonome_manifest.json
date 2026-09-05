@@ -1,0 +1,25 @@
+{
+  "fonts": {
+    "shinonome12.bin": {
+      "bitmapBytes": 167016,
+      "glyphs": 7039,
+      "pixelSize": 12,
+      "sha256": "eeccbd444530ef5ab41e5fc2fcd6ad628dca5c57f4f1af8b313045db2b6805ae"
+    },
+    "shinonome16.bin": {
+      "bitmapBytes": 222688,
+      "glyphs": 7039,
+      "pixelSize": 16,
+      "sha256": "5a047a84b5b89b695697b8ee63444f8b1060de5e49357b978727753d54aca939"
+    }
+  },
+  "format": "CDFN",
+  "formatVersion": 1,
+  "sources": {
+    "shnm6x12r.bdf": "bd54dc33f9caa588183c161a23f374def17be24d28417040cd277c264e4a07e4",
+    "shnm8x16r.bdf": "26eae5a2a057c5756b26f6343f235c0967996e6c1316eff38b94ccc31396d078",
+    "shnmk12.bdf": "17b0fa218105027f1d6615af3e5e46c2d0fbb2a6ac2fa2f7e5d39dff92d2116f",
+    "shnmk16.bdf": "9965accd5bdbe03bf9395b8dd26dfa4465f4ffa6e9f447c5cb8258644fa1f468"
+  },
+  "upstream": "Shinonome 0.9.11"
+}

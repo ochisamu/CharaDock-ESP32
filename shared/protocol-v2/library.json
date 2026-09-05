@@ -1,0 +1,12 @@
+{
+  "name": "CharaDockDeviceProtocolV2",
+  "version": "0.1.0",
+  "description": "Bounded binary framing shared by CharaDock ESP32 protocol-v2 devices",
+  "license": "Apache-2.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "includeDir": "include",
+    "srcDir": "src"
+  }
+}
