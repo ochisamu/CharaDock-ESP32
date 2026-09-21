@@ -62,6 +62,11 @@ void NativeFaceRenderer::renderPortrait(const uint16_t *rgb565Pixels,
 
 bool NativeFaceRenderer::ready() const { return ready_; }
 
+void NativeFaceRenderer::setCaption(const char *name, const char *caption) {
+  name_ = name ? name : "";
+  caption_ = caption ? caption : "";
+}
+
 void NativeFaceRenderer::drawEyes(const PresentationSnapshot &snapshot,
                                   uint16_t foreground, uint16_t accent) {
   if (snapshot.state == DeviceState::Error) {
@@ -85,11 +90,13 @@ void NativeFaceRenderer::drawEyes(const PresentationSnapshot &snapshot,
     canvas_.fillCircle(kRightEyeX, kEyeY, 8, foreground);
     return;
   }
-  int32_t gazeX = snapshot.state == DeviceState::Thinking ? 8 : 0;
-  int32_t gazeY = snapshot.state == DeviceState::Thinking ? -5 : 0;
+  // Subtle screen-only life; never powers or moves the physical servos.
+  const float phase = lastFrameAt_ * 0.0005f;
+  int32_t gazeX = snapshot.state == DeviceState::Thinking ? 8 : static_cast<int32_t>(3 * std::sin(phase));
+  int32_t gazeY = snapshot.state == DeviceState::Thinking ? -5 : static_cast<int32_t>(2 * std::sin(phase * 0.71f));
   const int32_t radius = snapshot.state == DeviceState::Listening ? 20 : 17;
-  canvas_.fillCircle(kLeftEyeX, kEyeY, radius, foreground);
-  canvas_.fillCircle(kRightEyeX, kEyeY, radius, foreground);
+  canvas_.fillCircle(kLeftEyeX + gazeX, kEyeY + gazeY, radius, foreground);
+  canvas_.fillCircle(kRightEyeX + gazeX, kEyeY + gazeY, radius, foreground);
   if (snapshot.state == DeviceState::Listening) {
     canvas_.fillCircle(kLeftEyeX + gazeX, kEyeY + gazeY, 7, accent);
     canvas_.fillCircle(kRightEyeX + gazeX, kEyeY + gazeY, 7, accent);
@@ -114,6 +121,15 @@ void NativeFaceRenderer::drawMouth(const PresentationSnapshot &snapshot,
 void NativeFaceRenderer::drawStatus(const PresentationSnapshot &snapshot,
                                     uint32_t nowMs, uint16_t foreground,
                                     uint16_t accent) {
+  canvas_.setFont(&fonts::efontJA_12);
+  canvas_.setTextColor(foreground);
+  canvas_.setTextWrap(true, false);
+  canvas_.setCursor(8, 8);
+  canvas_.print(name_);
+  canvas_.setClipRect(0, 188, 320, 52);
+  canvas_.setCursor(8, 190);
+  canvas_.print(caption_);
+  canvas_.clearClipRect();
   uint16_t status = accent;
   if (snapshot.state == DeviceState::Error)
     status = rgb565(0xd92d20);

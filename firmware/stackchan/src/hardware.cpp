@@ -99,12 +99,15 @@ void HardwareController::runSpeakerTest() {
 
 uint32_t HardwareController::sampleMicrophoneRms() {
   constexpr size_t kSamples = 1024;
-  int16_t samples[kSamples];
+  static int16_t samples[kSamples];
   M5.Speaker.end();
   if (!M5.Mic.isEnabled())
     M5.Mic.begin();
   if (!M5.Mic.record(samples, kSamples, 16000))
     return 0;
+  const uint32_t started = millis();
+  while (M5.Mic.isRecording() && millis() - started < 250) delay(1);
+  if (M5.Mic.isRecording()) { M5.Mic.end(); return 0; }
   uint64_t energy = 0;
   for (int16_t sample : samples) {
     const int32_t value = sample;

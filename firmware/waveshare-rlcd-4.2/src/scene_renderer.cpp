@@ -228,7 +228,18 @@ void SceneRenderer::header(U8G2 &canvas, const SceneSnapshot &scene,
 
 void SceneRenderer::footer(U8G2 &canvas, const SceneSnapshot &scene,
                            const SensorSnapshot &sensors) const {
-  const int top = kDisplayHeight - kFooterHeight;
+  // Optional three-line footer: playback state, title, artist. The host sends
+  // this only for a settled Home scene. Ordinary/older hosts keep one line.
+  const size_t first = scene.footer.find('\n');
+  const size_t second = first == std::string::npos ? std::string::npos
+                                                : scene.footer.find('\n', first + 1);
+  const bool music = scene.scene == SceneId::Home &&
+                     (scene.flags & SceneConnected) && second != std::string::npos;
+  const int top = kDisplayHeight - (music ? 76 : kFooterHeight);
+  if (music) {
+    canvas.setDrawColor(0);
+    canvas.drawBox(0, top, kDisplayWidth, 76);
+  }
   canvas.setDrawColor(1);
   canvas.drawHLine(0, top, kDisplayWidth);
   const std::string left = !scene.footer.empty()
@@ -236,7 +247,14 @@ void SceneRenderer::footer(U8G2 &canvas, const SceneSnapshot &scene,
                                : (scene.flags & SceneConnected
                                       ? "CharaDock connected"
                                       : "CharaDock offline");
-  text(canvas, font12_, left, 12, top + 6, 220, 12, 1);
+  text(canvas, font12_, music ? left.substr(0, first) : left,
+       12, top + 6, 220, 12, 1);
+  if (music) {
+    text(canvas, font16_, left.substr(first + 1, second - first - 1),
+         12, top + 22, kDisplayWidth - 24, 36, 2);
+    text(canvas, font12_, left.substr(second + 1),
+         12, top + 59, kDisplayWidth - 24, 12, 1);
+  }
 
   char environment[40] = {};
   if (sensors.shtc3Available && sensors.batteryAvailable) {

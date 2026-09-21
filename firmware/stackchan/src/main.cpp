@@ -14,6 +14,7 @@
 #include "charadock/portrait_cache.hpp"
 #include "charadock/presentation.hpp"
 #include "charadock/protocol_v2.hpp"
+#include "charadock/wifi_connection.hpp"
 
 #ifndef CHARADOCK_STACKCHAN_FIRMWARE_VERSION
 #define CHARADOCK_STACKCHAN_FIRMWARE_VERSION "0.1.0-dev"
@@ -60,6 +61,94 @@ size_t serialFrameExpectedBytes = 0;
 size_t serialRejectedFrames = 0;
 uint32_t observedAudioGeneration = 0;
 SerialInputMode serialInputMode = SerialInputMode::Console;
+charadock::WifiConnection wifi;
+charadock::UsbTransport usb(Serial, "usb");
+uint16_t eventSequence = 0;
+uint32_t usbSeenAt = 0, wifiSeenAt = 0;
+bool usbReady = false, wifiActive = false, captureActive = false;
+bool micPending = false;
+bool wasConnected = false, microphoneEnabled = true;
+bool usbMicrophoneEnabled = true, wifiMicrophoneEnabled = true;
+uint32_t captureStartedAt = 0;
+int16_t micBlock[320] = {};
+
+bool hostConnected() {
+  return usbReady || (wifi.hostAuthenticated() && millis() - wifiSeenAt < 24000);
+}
+charadock::UsbTransport &activeTransport() { return wifiActive ? wifi.transport() : usb; }
+void stopCapture(bool complete) {
+  const bool wasActive = captureActive;
+  captureActive = false;
+  M5.Mic.end();
+  micPending = false;
+  if (wasActive && complete && hostConnected()) {
+    activeTransport().send(charadock::protocol::FrameType::PttEnd, ++eventSequence);
+    presentation.setState(charadock::DeviceState::Thinking, millis());
+  }
+}
+void interruptConversation(bool notify = true) {
+  stopCapture(false);
+  audioPlayback.stop();
+  hardware.stopSpeakerStream();
+  presentation.setMouthLevel(0);
+  presentation.setState(charadock::DeviceState::Idle, millis());
+  if (notify && hostConnected()) activeTransport().send(charadock::protocol::FrameType::Interrupt, ++eventSequence);
+  if (face) face->setCaption("CharaDock", "");
+}
+void startCapture() {
+  if (!hostConnected() || !microphoneEnabled) return;
+  // Touch-down already interrupted any prior reply. A second asynchronous
+  // host Interrupt adjacent to PttStart could cancel this new capture.
+  interruptConversation(false);
+  if (!M5.Mic.begin()) {
+    presentation.setState(charadock::DeviceState::Error, millis());
+    return;
+  }
+  captureActive = true;
+  captureStartedAt = millis();
+  presentation.setState(charadock::DeviceState::Listening, millis());
+  if (!activeTransport().send(charadock::protocol::FrameType::PttStart, ++eventSequence))
+    stopCapture(false);
+}
+void updateCapture() {
+  if (!captureActive) return;
+  if (!hostConnected() || millis() - captureStartedAt > 30000) {
+    stopCapture(hostConnected());
+    return;
+  }
+  if (micPending) {
+    if (M5.Mic.isRecording()) return;
+    micPending = false;
+    if (!activeTransport().send(charadock::protocol::FrameType::PcmChunk,
+          ++eventSequence, reinterpret_cast<uint8_t *>(micBlock), sizeof(micBlock))) {
+      interruptConversation();
+      return;
+    }
+  }
+  micPending = M5.Mic.record(micBlock, 320, 16000);
+  if (!micPending) interruptConversation();
+}
+
+void sendHello(charadock::UsbTransport &target, uint16_t sequence,
+               charadock::protocol::FrameType type) {
+  JsonDocument doc;
+  doc["protocol"] = 2;
+  doc["board"] = "m5stack-stackchan-k151";
+  doc["deviceId"] = deviceId;
+  doc["firmware"] = CHARADOCK_STACKCHAN_FIRMWARE_VERSION;
+  doc["capabilities"]["audio"]["capture"] = true;
+  doc["capabilities"]["audio"]["playback"] = audioPlayback.storageReady();
+  doc["capabilities"]["audio"]["sampleRate"] = 16000;
+  doc["capabilities"]["audio"]["duplex"] = "half";
+  doc["capabilities"]["display"]["width"] = 320;
+  doc["capabilities"]["display"]["height"] = 240;
+  doc["capabilities"]["display"]["bitsPerPixel"] = 16;
+  doc["capabilities"]["display"]["bitmap"].add("rgb565le");
+  doc["capabilities"]["motion"]["enabled"] = hardware.motionEnabled();
+  String payload;
+  serializeJson(doc, payload);
+  target.send(type, sequence, reinterpret_cast<const uint8_t *>(payload.c_str()), payload.length());
+}
 
 uint32_t parseColor(const String &value, uint32_t fallback) {
   String normalized = value;
@@ -411,7 +500,8 @@ void resetSerialFrameInput() {
 }
 
 void sendProtocolOutcome(const charadock::protocol::Frame &request,
-                         const charadock::FrameApplyOutcome &outcome) {
+                         const charadock::FrameApplyOutcome &outcome,
+                         charadock::UsbTransport *target = nullptr) {
   const bool accepted =
       outcome.result == charadock::FrameApplyResult::Applied ||
       outcome.result == charadock::FrameApplyResult::PortraitCompleted ||
@@ -424,9 +514,98 @@ void sendProtocolOutcome(const charadock::protocol::Frame &request,
                       static_cast<uint8_t>(outcome.result),
                       static_cast<uint8_t>(outcome.portraitResult),
                       static_cast<uint8_t>(outcome.audioResult)};
-  const auto encoded = charadock::protocol::encodeFrame(response);
-  if (!encoded.empty())
-    Serial.write(encoded.data(), encoded.size());
+  (target ? *target : usb).send(response.type, response.sequence,
+                               response.payload.data(), response.payload.size());
+}
+
+void handleConnectedFrame(const charadock::protocol::Frame &frame, bool network) {
+  using charadock::protocol::FrameType;
+  auto &target = network ? wifi.transport() : usb;
+  const auto reply = [&](bool ok) {
+    sendProtocolOutcome(frame, {ok ? charadock::FrameApplyResult::Applied
+                                   : charadock::FrameApplyResult::InvalidPayload}, &target);
+  };
+  if (network && frame.type == FrameType::AuthChallenge) {
+    uint8_t proof[32];
+    if (wifi.createAuthenticationProof(frame.payload.data(), frame.payload.size(), proof))
+      target.send(FrameType::DeviceAuth, frame.sequence, proof, sizeof(proof));
+    return;
+  }
+  if (frame.type == FrameType::HostHello) {
+    const bool authenticated = wifi.hostAuthenticated();
+    if (network && ((!authenticated &&
+        !wifi.markHostAuthenticated(frame.payload.data(), frame.payload.size())) ||
+        (authenticated && !frame.payload.empty()))) {
+      wifi.resetHost(); return;
+    }
+    if (network) wifiSeenAt = millis();
+    else { usbReady = true; usbSeenAt = millis(); }
+    reply(true);
+    sendHello(target, frame.sequence, FrameType::DeviceHello);
+    return;
+  }
+  if (network && !wifi.hostAuthenticated()) { wifi.resetHost(); return; }
+  if (network) wifiSeenAt = millis();
+  else if (usbReady) usbSeenAt = millis();
+  if (frame.type == FrameType::DeviceHello || frame.type == FrameType::Capabilities) {
+    sendHello(target, frame.sequence, frame.type); return;
+  }
+  if (frame.type == FrameType::WifiConfig) {
+    const char *error = "";
+    reply(!network && wifi.provision(frame.payload.data(), frame.payload.size(), error));
+    return;
+  }
+  if (frame.type == FrameType::WifiStatus) {
+    wifi.sendStatus(target, frame.sequence, wifi.networkConnected() ? "connected" : "disconnected");
+    return;
+  }
+  if (frame.type == FrameType::CaptureConfig) {
+    // Shared capture mode(PTT=0, disabled=2), threshold(u16).
+    if (frame.payload.size() != 3 || (frame.payload[0] != 0 && frame.payload[0] != 2)) {
+      reply(false); return;
+    }
+    (network ? wifiMicrophoneEnabled : usbMicrophoneEnabled) = frame.payload[0] == 0;
+    microphoneEnabled = wifiActive ? wifiMicrophoneEnabled : usbMicrophoneEnabled;
+    if (!microphoneEnabled && captureActive) interruptConversation();
+    reply(true); return;
+  }
+  // Allow diagnostics and standby configuration on both links, but only
+  // the USB-preferred owner may change conversation/display state.
+  if (network && usbReady) { reply(false); return; }
+  if (frame.type == FrameType::Motion) {
+    if (!hostConnected() || frame.payload.size() != 1 || frame.payload[0] > 1) { reply(false); return; }
+    hardware.setMotionEnabled(frame.payload[0] == 1);
+    reply(true); return;
+  }
+  if (static_cast<uint8_t>(frame.type) == 0x60) {
+    JsonDocument scene;
+    if (frame.payload.size() > 1024 || deserializeJson(scene, frame.payload.data(), frame.payload.size()) ||
+        !scene["caption"].is<const char *>() || !scene["name"].is<const char *>()) { reply(false); return; }
+    if (face) face->setCaption(scene["name"].as<const char *>(), scene["caption"].as<const char *>());
+    reply(true); return;
+  }
+  if (frame.type == FrameType::AudioBegin) stopCapture(false);
+  sendProtocolOutcome(frame, frameDispatcher->apply(frame, millis()), &target);
+}
+
+void updateConnection() {
+  const uint32_t now = millis();
+  // Avoid a blocking LAN reconnect attempt starving USB microphone/playback.
+  if ((!captureActive && !audioPlayback.active()) || wifi.socketConnected()) wifi.update(now);
+  if (wifi.takeSocketOpened() || wifi.shouldSendHello(now))
+    sendHello(wifi.transport(), ++eventSequence, charadock::protocol::FrameType::DeviceHello);
+  if (usbReady && (!Serial || now - usbSeenAt >= 24000)) usbReady = false;
+  if (wifi.hostAuthenticated() && now - wifiSeenAt >= 24000) wifi.resetHost();
+  const bool nextWifi = !usbReady && wifi.hostAuthenticated();
+  const bool connected = hostConnected();
+  if (nextWifi != wifiActive || (!connected && wasConnected)) {
+    interruptConversation(wasConnected);
+    hardware.setMotionEnabled(false);
+    wifiActive = nextWifi;
+  }
+  wasConnected = connected;
+  microphoneEnabled = wifiActive ? wifiMicrophoneEnabled : usbMicrophoneEnabled;
+  for (const auto &frame : wifi.poll()) handleConnectedFrame(frame, true);
 }
 
 void sendProtocolInvalidFromHeader() {
@@ -453,8 +632,7 @@ void applySerialFrame() {
     sendProtocolInvalidFromHeader();
     return;
   }
-  const auto outcome = frameDispatcher->apply(frames[0], millis());
-  sendProtocolOutcome(frames[0], outcome);
+  handleConnectedFrame(frames[0], false);
 }
 
 void consumeSerialFrameByte(uint8_t value) {
@@ -489,7 +667,8 @@ void pollSerialInput() {
     ++serialRejectedFrames;
     resetSerialFrameInput();
   }
-  while (Serial.available()) {
+  size_t budget = 512;
+  while (budget-- && Serial.available()) {
     const uint8_t value = static_cast<uint8_t>(Serial.read());
     if (serialInputMode == SerialInputMode::Console) {
       if (consoleLine.length() == 0 && value == 'C') {
@@ -615,8 +794,10 @@ void handleTouch() {
     touchInterruptedPlayback = false;
     expressionBeforeTouch = presentation.snapshot().expression;
     if (presentation.snapshot().state == charadock::DeviceState::Speaking ||
+        presentation.snapshot().state == charadock::DeviceState::Thinking ||
         audioPlayback.active() || hardware.speakerPlaying()) {
       Serial.println("event interrupt");
+      interruptConversation();
       audioPlayback.stop();
       envelopePreviewActive = false;
       mouthEnvelope.close(now);
@@ -626,15 +807,16 @@ void handleTouch() {
     }
     presentation.setExpression(charadock::Expression::Listening);
   }
-  if (touched && !pttStarted && now - touchStartedAt >= kLongPressMs) {
+  if (touched && !pttStarted && microphoneEnabled && now - touchStartedAt >= kLongPressMs) {
     pttStarted = true;
     presentation.setState(charadock::DeviceState::Listening, now);
     Serial.println("event ptt-start");
+    startCapture();
   }
   if (!touched && touchWasPressed) {
     if (pttStarted) {
-      presentation.setState(charadock::DeviceState::Thinking, now);
       Serial.println("event ptt-end");
+      stopCapture(true);
     } else if (touchInterruptedPlayback) {
       presentation.setState(charadock::DeviceState::Idle, now);
       presentation.setExpression(charadock::Expression::Neutral);
@@ -662,6 +844,7 @@ void setup() {
   deviceId = id;
 
   hardware.begin();
+  wifi.begin(deviceId.c_str());
   initializePortraitCache();
   initializeAudioPlayback();
   frameDispatcher = std::make_unique<charadock::FrameDispatcher>(
@@ -680,16 +863,19 @@ void setup() {
                 CHARADOCK_STACKCHAN_FIRMWARE_VERSION, deviceId.c_str());
   Serial.println("Servo power is OFF. Type 'help' for bring-up commands.");
   printCapabilities();
+  sendHello(usb, ++eventSequence, charadock::protocol::FrameType::DeviceHello);
 }
 
 void loop() {
   const uint32_t now = millis();
   hardware.update();
   pollSerialInput();
+  updateConnection();
   handleTouch();
+  updateCapture();
   updateAudioPlayback(now);
   updateEnvelopePreview(now);
-  if (presentation.snapshot().state == charadock::DeviceState::Thinking &&
+  if (!hostConnected() && presentation.snapshot().state == charadock::DeviceState::Thinking &&
       now - presentation.stateChangedAt() >= kThinkingPreviewMs) {
     presentation.setState(charadock::DeviceState::Idle, now);
     presentation.setExpression(charadock::Expression::Neutral);

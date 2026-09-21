@@ -21,6 +21,8 @@ enum class InputEventCode : uint8_t {
   Interrupt = 4,
   Diagnostic = 5,
   Reconnect = 6,
+  MeetingMute = 7,
+  MeetingUnmute = 8,
 };
 
 class UsbTransport {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <Arduino.h>
+#include <Preferences.h>
 
 #include <algorithm>
 #include <cmath>
@@ -70,6 +71,13 @@ St7305Display display(pins::kDisplayClock, pins::kDisplayMosi,
 SceneRenderer renderer;
 BoardSensors sensors;
 AudioOutput audio;
+// Latched until the next begin. Completion means pollEvent has drained DMA
+// and shut down the codec, not merely that AUDIO_END was accepted.
+uint8_t playbackStatus = 0; // 0 completed, 1 busy, 2 failed, 3 stopped
+void stopAudioPlayback() {
+  playbackStatus = 3;
+  audio.stopPlayback();
+}
 AudioInput microphone;
 SceneModel scene;
 MonochromeAssetStore portrait;
@@ -99,6 +107,7 @@ CaptureMode captureMode = CaptureMode::PushToTalk;
 Link captureLink = Link::Usb;
 bool captureMonitoring = false;
 bool recording = false;
+bool meetingMuted = false;
 bool pendingVoiceCandidate = false;
 bool forcedHandsFreeRecording = false;
 uint8_t microphoneBuffer[kMicrophoneChunkBytes] = {};
@@ -160,7 +169,7 @@ void selectBestLink() {
   // Never move an in-flight utterance or playback to a different transport.
   const Link previous = activeLink;
   stopCapture(false);
-  audio.stopPlayback();
+  stopAudioPlayback();
   if (linkConnected(previous))
     transportFor(previous).send(charadock::protocol::FrameType::Interrupt,
                                 nextSequence(), nullptr, 0);
@@ -217,6 +226,14 @@ void renderIfNeeded() {
   renderer.compose(display.canvas(), scene.active(), sensors.snapshot(),
                    *activePortrait, keyButton.pressed(), ambientMode,
                    portraitOffsetX, portraitOffsetY);
+  if (meetingMuted) {
+    auto &canvas = display.canvas();
+    canvas.setDrawColor(0);
+    canvas.drawBox(0, 0, 170, 27);
+    canvas.setDrawColor(1);
+    canvas.setFont(u8g2_font_helvB12_tr);
+    canvas.drawStr(5, 19, "MIC + SPEAKER OFF");
+  }
   const uint32_t flushMicros = display.flush();
   scene.clearDirty();
   renderRequested = false;
@@ -358,10 +375,11 @@ void stopCapture(bool sendEnd) {
 }
 
 bool startCapture(bool beginRecording, bool forced = false) {
+  if (meetingMuted) return false;
   if (captureMode == CaptureMode::Disabled || !anyHostConnected())
     return false;
   if (audio.active())
-    audio.stopPlayback();
+    stopAudioPlayback();
   selectBestLink();
   if (!microphone.start()) {
     scene.updateState(DeviceState::Error);
@@ -557,6 +575,7 @@ void streamMicrophone() {
 }
 
 void ensureHandsFreeMonitoring(uint32_t now) {
+  if (meetingMuted) return;
   if (captureMode != CaptureMode::HandsFree || captureMonitoring ||
       recording || audio.active() || !anyHostConnected())
     return;
@@ -571,6 +590,7 @@ void ensureHandsFreeMonitoring(uint32_t now) {
 }
 
 void handleKeyEvent(const ButtonEvent &event) {
+  if (meetingMuted) return;
   DeviceState currentState = scene.active().state;
   if (event.action == ButtonAction::Pressed) {
     ambientAtKeyPress = ambientMode;
@@ -604,7 +624,7 @@ void handleKeyEvent(const ButtonEvent &event) {
     } else if (captureMode != CaptureMode::Disabled) {
       if (currentState == DeviceState::Speaking ||
           currentState == DeviceState::Thinking) {
-        audio.stopPlayback();
+        stopAudioPlayback();
         stopCapture(false);
         sendActive(charadock::protocol::FrameType::Interrupt);
       }
@@ -655,7 +675,7 @@ void handleKeyEvent(const ButtonEvent &event) {
   if (currentState == DeviceState::Thinking ||
       currentState == DeviceState::Speaking ||
       currentState == DeviceState::Working) {
-    audio.stopPlayback();
+    stopAudioPlayback();
     stopCapture(false);
     sendActive(charadock::protocol::FrameType::Interrupt);
     scene.updateState(DeviceState::Idle);
@@ -703,6 +723,24 @@ void handleKeyEvent(const ButtonEvent &event) {
 }
 
 void handleBootEvent(const ButtonEvent &event) {
+  if (event.action == ButtonAction::ShortPress) {
+    meetingMuted = !meetingMuted;
+    // Do not send PttEnd: the partial recording must be discarded, not STT'd.
+    stopCapture(false);
+    stopAudioPlayback();
+    scene.updateState(DeviceState::Idle);
+    Preferences settings;
+    if (settings.begin("meeting", false)) {
+      settings.putBool("muted", meetingMuted);
+      settings.end();
+    }
+    transportFor(activeLink).sendInput(nextSequence(), event.button,
+        meetingMuted ? InputEventCode::MeetingMute : InputEventCode::MeetingUnmute,
+        event.durationMs);
+    if (!meetingMuted) scheduleHandsFreeResume();
+    requestRender();
+    return;
+  }
   if (event.action != ButtonAction::LongPress)
     return;
   char diagnostic[200] = {};
@@ -766,6 +804,12 @@ void handleProtocolFrame(const charadock::protocol::Frame &frame, Link link) {
     selectBestLink();
     transport.respond(frame, appliedOutcome());
     transport.sendDeviceHello(nextSequence(), deviceId);
+    // Reannounce the physical latch after reconnect/heartbeat. The PC must
+    // deduplicate it, while the local audio gate never depends on that PC.
+    if (link == activeLink)
+      transport.sendInput(nextSequence(), ButtonId::Boot,
+                          meetingMuted ? InputEventCode::MeetingMute
+                                       : InputEventCode::MeetingUnmute, 0);
     if (link == activeLink && !frame.payload.empty() && !recording && !audio.active()) {
       scene.updateState(DeviceState::Idle);
       scheduleHandsFreeResume();
@@ -855,10 +899,31 @@ void handleProtocolFrame(const charadock::protocol::Frame &frame, Link link) {
     transport.respond(frame, FrameApplyOutcome{});
     return;
   }
+  if (frame.type == charadock::protocol::FrameType::AudioStatus) {
+    if (!frame.payload.empty()) {
+      transport.respond(frame, invalidOutcome());
+    } else {
+      transport.send(frame.type, frame.sequence, &playbackStatus, 1);
+    }
+    return;
+  }
   if (frame.type == charadock::protocol::FrameType::AudioBegin)
     stopCapture(recording);
 
+  if (meetingMuted &&
+      (frame.type == charadock::protocol::FrameType::AudioBegin ||
+       frame.type == charadock::protocol::FrameType::AudioChunk ||
+       frame.type == charadock::protocol::FrameType::AudioEnd)) {
+    transport.respond(frame, invalidOutcome());
+    return;
+  }
+
   const FrameApplyOutcome outcome = dispatcher.apply(frame);
+  if (frame.type == charadock::protocol::FrameType::AudioBegin)
+    playbackStatus = outcome.result == FrameApplyResult::Applied ? 1 : 2;
+  if (frame.type == charadock::protocol::FrameType::AudioStop &&
+      outcome.result == FrameApplyResult::Applied)
+    playbackStatus = 3;
   transport.respond(frame, outcome);
   // PC sends Listening only after its speech gate admits the utterance.
   // Local energy detection alone must not dismiss the clock dashboard.
@@ -913,7 +978,7 @@ void handleConnectionTimeouts(uint32_t now) {
   selectBestLink();
   if (!anyHostConnected() && scene.active().state != DeviceState::Offline) {
     stopCapture(false);
-    audio.stopPlayback();
+    stopAudioPlayback();
     scene.setLocalScene(offlineSnapshot(scene.active()));
     requestRender();
     Serial.println("# host heartbeat timed out; showing offline snapshot");
@@ -923,6 +988,11 @@ void handleConnectionTimeouts(uint32_t now) {
 } // namespace
 
 void setup() {
+  Preferences settings;
+  if (settings.begin("meeting", true)) {
+    meetingMuted = settings.getBool("muted", false);
+    settings.end();
+  }
   // A 4 KiB PCM frame can arrive while the reflective LCD is flushing, so
   // reserve two complete frames before USB starts.
   Serial.setRxBufferSize(8192 + 2 * charadock::protocol::kHeaderBytes);
@@ -987,6 +1057,7 @@ void loop() {
 
   const AudioPlaybackEvent audioEvent = audio.pollEvent();
   if (audioEvent != AudioPlaybackEvent::None) {
+    playbackStatus = audioEvent == AudioPlaybackEvent::Completed ? 0 : 2;
     scene.updateState(audioEvent == AudioPlaybackEvent::Completed
                           ? DeviceState::Idle
                           : DeviceState::Error);

@@ -28,6 +28,7 @@ enum class FrameType : uint8_t {
   AudioChunk = 0x22,
   AudioEnd = 0x23,
   AudioStop = 0x24,
+  AudioStatus = 0x25,
   WifiConfig = 0x30,
   WifiStatus = 0x31,
   CaptureConfig = 0x32,

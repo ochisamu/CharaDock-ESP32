@@ -17,6 +17,7 @@ public:
   void renderPortrait(const uint16_t *rgb565Pixels,
                       const PresentationSnapshot &snapshot, uint32_t nowMs);
   bool ready() const;
+  void setCaption(const char *name, const char *caption);
 
 private:
   void drawEyes(const PresentationSnapshot &snapshot, uint16_t foreground,
@@ -33,6 +34,7 @@ private:
   M5Canvas canvas_;
   bool ready_ = false;
   uint32_t lastFrameAt_ = 0;
+  String name_, caption_;
 };
 
 } // namespace charadock

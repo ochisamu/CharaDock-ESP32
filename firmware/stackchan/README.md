@@ -1,6 +1,6 @@
 # CharaDock StackChan firmware
 
-Early hardware bring-up firmware for the M5Stack StackChan K151 (CoreS3). CharaDock remains the source of truth for character, conversation, voice, expression, and device presentation.
+Build-verified preview firmware for the M5Stack StackChan K151 (CoreS3). CharaDock remains the source of truth for character, conversation, voice, expression, and device presentation. The new Wi-Fi/conversation integration is not yet hardware-verified. See [integration and first-device checklist](../../docs/stackchan-conversation.md).
 
 ## Current vertical slice
 
@@ -10,7 +10,7 @@ Early hardware bring-up firmware for the M5Stack StackChan K151 (CoreS3). CharaD
 - connecting, idle, listening, thinking, speaking, and error states
 - neutral, listening, thinking, happy, surprised, and soft expressions
 - 3-level mouth state and randomized 4–7 second blink
-- head-touch short action and push-to-talk long press preview
+- head-touch portrait action, 500 ms hold-to-talk, release-to-send (30 second cap)
 - state-matched RGB feedback
 - explicit speaker tone and microphone RMS bring-up checks
 - conservative, explicit-only servo test; servo power is off at boot
@@ -24,7 +24,7 @@ Early hardware bring-up firmware for the M5Stack StackChan K151 (CoreS3). CharaD
 - idempotent audio retry, bounded backpressure, immediate touch/`AudioStop` interruption
 - strict WAV diagnostic sender with real-time pacing and click-reducing edge fades
 
-The portrait and speaker receivers can be exercised over USB before CharaDock's authenticated protocol-v2 host is connected. Wi-Fi/authenticated transport, microphone PCM upload, and CharaDock PC integration are intentionally not enabled before the first physical-device validation.
+The portrait and speaker receivers can be exercised over USB before CharaDock's authenticated protocol-v2 host is connected. USB-only provisioning, mutually authenticated Wi-Fi, USB-preferred transport ownership, microphone PCM upload, and a PC-side StackChan adapter are now implemented. Speech recognition and TTS run on the PC, not on StackChan; no sanoTTS dependency is added. Hands-free/AEC and the RLCD clock UI are not implemented on this target.
 
 Portrait storage uses two 153,600-byte PSRAM slots. A new transfer is displayed only after every sequential chunk arrives and the full RGB565 payload passes CRC-32. A failed or interrupted transfer leaves the previous verified portrait active; missing PSRAM falls back to Native Face.
 
@@ -88,9 +88,9 @@ audio speaker-test|mic-test|envelope-preview|stream-stop
 
 `portrait test` generates a local RGB565 test face, sends it through the same staged cache path, and shows it using the current display mode. In Hybrid mode, `portrait show` or a short head touch displays it for 1.5 seconds before returning to Native Face. Character Art keeps it visible. `audio envelope-preview` exercises the three mouth levels without a network connection.
 
-The current firmware treats a short head touch as a portrait/demo request and a 500 ms hold as a PTT preview. Touch-down gives immediate visual feedback. These events become protocol messages when the authenticated v2 transport lands.
+The firmware treats a short head touch as a portrait/demo request and a 500 ms hold as PTT. Touch-down gives immediate visual feedback. An established USB host or mutually authenticated Wi-Fi host receives PttStart, 20 ms PCM16 blocks, and PttEnd. Speaker playback stops before capture starts.
 
-Touching the head while PCM is playing interrupts the speaker immediately. A short release remains idle and does not also trigger the portrait action; continuing to hold transitions into the PTT preview. This keeps interruption and long-press input on one predictable gesture path.
+Touching the head while PCM is playing or a response is pending interrupts that turn. A short release remains idle and does not also trigger the portrait action; continuing to hold starts a new PTT capture. This keeps interruption and long-press input on one predictable gesture path.
 
 ## Send a real portrait over USB
 

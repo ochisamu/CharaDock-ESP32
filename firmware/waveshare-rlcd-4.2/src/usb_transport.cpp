@@ -91,7 +91,7 @@ bool UsbTransport::sendCapabilities(uint16_t sequence, const char *deviceId) {
       "\"bitsPerPixel\":1,\"orientation\":\"landscape\","
       "\"localFonts\":[\"shinonome-12\",\"shinonome-16\"],"
       "\"bitmap\":[\"raw1-msb\"]},"
-      "\"audio\":{\"capture\":true,\"playback\":true,"
+      "\"audio\":{\"capture\":true,\"playback\":true,\"playbackStatus\":true,"
       "\"format\":\"pcm-s16le-mono\",\"sampleRates\":[16000],"
       "\"duplex\":\"half\",\"prebufferMs\":256},"
       "\"network\":{\"wifi\":true,\"provisioning\":\"usb-only\","
