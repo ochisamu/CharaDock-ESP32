@@ -14,7 +14,7 @@
 namespace {
 
 constexpr uint32_t kSerialBaud = 500000;
-constexpr char kFirmwareVersion[] = "0.7.0";
+constexpr char kFirmwareVersion[] = "0.7.1";
 constexpr uint32_t kAudioSampleRate = 16000;
 constexpr uint16_t kDiscoveryPort = 41721;
 constexpr uint16_t kDiscoveryLocalPort = 41723;
