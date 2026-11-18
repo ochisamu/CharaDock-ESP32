@@ -35,13 +35,15 @@ struct AudioStreamConfig {
   uint8_t volume = 72;
   bool signedSamples = true;
   bool littleEndian = true;
+  bool imaAdpcm = false;
+  uint32_t expectedSamples = 0;
 };
 
 class PcmPlaybackBuffer {
 public:
   static constexpr uint32_t kRequiredSampleRate = 16000;
   static constexpr uint16_t kMinimumPrebufferMs = 80;
-  static constexpr uint16_t kMaximumPrebufferMs = 500;
+  static constexpr uint16_t kMaximumPrebufferMs = 1000;
 
   bool attach(int16_t *storage, size_t sampleCapacity);
   AudioBufferResult begin(const AudioStreamConfig &config, uint16_t sequence);
@@ -49,6 +51,7 @@ public:
                                 size_t byteCount);
   AudioBufferResult end(uint16_t sequence);
   void stop();
+  bool adoptStaged(PcmPlaybackBuffer &staged);
 
   // prepareSamples copies without consuming. Call commitSamples only after the
   // hardware speaker accepts the block, so a busy output queue loses no audio.
@@ -65,6 +68,7 @@ public:
   size_t capacitySamples() const;
   size_t prebufferSamples() const;
   uint32_t generation() const;
+  uint16_t beginSequence() const { return beginSequence_; }
   uint32_t underrunCount() const;
 
 private:

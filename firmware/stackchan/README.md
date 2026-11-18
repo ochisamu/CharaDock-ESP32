@@ -1,6 +1,6 @@
 # CharaDock StackChan firmware
 
-Build-verified preview firmware for the M5Stack StackChan K151 (CoreS3). CharaDock remains the source of truth for character, conversation, voice, expression, and device presentation. The new Wi-Fi/conversation integration is not yet hardware-verified. See [integration and first-device checklist](../../docs/stackchan-conversation.md).
+Preview firmware for the M5Stack StackChan K151 (CoreS3). CharaDock remains the source of truth for character, conversation, voice, expression, and device presentation. On real hardware, the Windows development build verified a GPT-Live reply over Wi-Fi through to speaker drain. See the [integration and physical-device checklist](../../docs/stackchan-conversation.md) for the remaining routes.
 
 ## Current vertical slice
 
@@ -18,9 +18,10 @@ Build-verified preview firmware for the M5Stack StackChan K151 (CoreS3). CharaDo
 - Hybrid / Character Art / Native Face presentation model with artwork-policy fallback
 - atomic, CRC-verified RGB565 portrait staging in two PSRAM slots
 - 1.5 second Hybrid portrait presentation and persistent Static Character Art
-- played-PCM mouth envelope with hysteresis, release hold, and a 10 Hz update cap
+- speaker-queue PCM mouth envelope with hysteresis and release hold
+- one-shot conversation gestures for acknowledgement, thought, delight, and reassurance
 - USB PCM16 speaker stream with 80–500 ms configurable prebuffer
-- 1.024 second circular jitter buffer and three rotating 20 ms speaker blocks
+- 1.024 second circular jitter buffer and three rotating 40 ms speaker blocks
 - idempotent audio retry, bounded backpressure, immediate touch/`AudioStop` interruption
 - strict WAV diagnostic sender with real-time pacing and click-reducing edge fades
 
@@ -79,14 +80,19 @@ state connecting|idle|listening|thinking|speaking|error
 expression neutral|listening|thinking|happy|surprised|soft
 mouth 0|1|2
 mode hybrid|character-art|native-face
-theme FFF5DF 171513 D99A24
+theme 101619 FFF4E4 F0A086
 artwork on|off
 portrait test|show|invalidate
 motion on|off|test
 audio speaker-test|mic-test|envelope-preview|stream-stop
+display snapshot
 ```
 
 `portrait test` generates a local RGB565 test face, sends it through the same staged cache path, and shows it using the current display mode. In Hybrid mode, `portrait show` or a short head touch displays it for 1.5 seconds before returning to Native Face. Character Art keeps it visible. `audio envelope-preview` exercises the three mouth levels without a network connection.
+
+`display snapshot` sends the last rendered 320×240 frame from the USB console. After the `STACKCHAN RGB565LE 320 240` line, read 153,600 row-major bytes. Run it while recording and playback are idle and USB is available for diagnostics.
+
+The CharaDock development build accepts `--verify-stackchan-live=<wav-path>` with the paired StackChan profile and GPT-Live selected. It feeds a local speech fixture through the device input route, opens a real GPT-Live session, and verifies the reply reaches the StackChan and drains from its speaker queue.
 
 The firmware treats a short head touch as a portrait/demo request and a 500 ms hold as PTT. Touch-down gives immediate visual feedback. An established USB host or mutually authenticated Wi-Fi host receives PttStart, 20 ms PCM16 blocks, and PttEnd. Speaker playback stops before capture starts.
 

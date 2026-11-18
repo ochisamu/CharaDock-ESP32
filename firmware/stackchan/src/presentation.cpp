@@ -15,8 +15,13 @@ void PresentationController::setState(DeviceState state, uint32_t nowMs) {
     return;
   snapshot_.state = state;
   stateChangedAt_ = nowMs;
-  if (state == DeviceState::Listening)
+  if (state == DeviceState::Listening) {
     snapshot_.expression = Expression::Listening;
+    micFloor_ = 64;
+    voicedMicBlocks_ = quietMicBlocks_ = 0;
+    acknowledgedPause_ = false;
+  }
+  snapshot_.listeningToVoice = false;
   if (state == DeviceState::Thinking)
     snapshot_.expression = Expression::Thinking;
   if (state == DeviceState::Error)
@@ -46,6 +51,81 @@ void PresentationController::setTheme(const Theme &theme) {
 
 void PresentationController::setMouthLevel(uint8_t level) {
   snapshot_.mouthLevel = std::min<uint8_t>(2, level);
+}
+
+void PresentationController::observeMicrophone(const int16_t *samples, size_t count,
+                                               uint32_t nowMs) {
+  if (snapshot_.state != DeviceState::Listening || !samples || !count)
+    return;
+  uint32_t amplitude = 0;
+  for (size_t i = 0; i < count; ++i) {
+    const int32_t sample = samples[i];
+    amplitude += sample < 0 ? -sample : sample;
+  }
+  amplitude /= count;
+  const bool voiced = amplitude >= std::max<uint32_t>(180, micFloor_ * 3);
+  if (voiced) {
+    voicedMicBlocks_ = std::min<int>(voicedMicBlocks_ + 1, 80);
+    quietMicBlocks_ = 0;
+    if (voicedMicBlocks_ >= 4)
+      snapshot_.listeningToVoice = true;
+    return;
+  }
+  micFloor_ = (micFloor_ * 15 + amplitude) / 16;
+  quietMicBlocks_ = std::min<int>(quietMicBlocks_ + 1, 40);
+  if (quietMicBlocks_ == 9) {
+    // Mic callbacks represent completed 20 ms blocks. A short knock or an
+    // isolated consonant must not produce a listening nod.
+    if (voicedMicBlocks_ >= 24 && !acknowledgedPause_) {
+      acknowledgedPause_ = true;
+      listeningNodAt_ = nowMs;
+    }
+    voicedMicBlocks_ = 0;
+  }
+  if (quietMicBlocks_ >= 19)
+    snapshot_.listeningToVoice = false;
+}
+
+SpeechCues PresentationController::observeSpeech(uint16_t rms, uint32_t nowMs) {
+  targetAperture_ = static_cast<uint8_t>(std::clamp((static_cast<int>(rms) - 260) / 18, 0, 100));
+  if (rms < 450)
+    return {};
+  const bool afterPause = observedSpeechBlocks_ >= 4 && nowMs - lastVoicedSpeechAt_ >= 220;
+  lastVoicedSpeechAt_ = nowMs;
+  if (observedSpeechBlocks_ == 0)
+    speechBaseline_ = rms;
+  const bool accent = observedSpeechBlocks_ >= 4 && rms >= 1250 &&
+      rms * 4u >= speechBaseline_ * 7u &&
+      (!hasAccent_ || nowMs - accentAt_ >= 1500);
+  speechBaseline_ = (speechBaseline_ * 7u + rms) / 8u;
+  observedSpeechBlocks_ = std::min<int>(observedSpeechBlocks_ + 1, 80);
+  if (accent) {
+    hasAccent_ = true;
+    accentAt_ = nowMs;
+  }
+  const bool motionDue = !hasSpeechMotion_ ||
+      nowMs - lastSpeechMotionAt_ >= 2400;
+  const bool moveHead = motionDue && rms >= 640 &&
+      (observedSpeechBlocks_ == 4 || afterPause || accent);
+  if (moveHead) {
+    hasSpeechMotion_ = true;
+    lastSpeechMotionAt_ = nowMs;
+  }
+  return {accent, moveHead};
+}
+
+void PresentationController::closeSpeech() {
+  targetAperture_ = 0;
+  snapshot_.mouthAperture = 0;
+  snapshot_.speakingWithEmphasis = false;
+  speechBaseline_ = 0;
+  observedSpeechBlocks_ = 0;
+  hasAccent_ = false;
+}
+
+void PresentationController::setFacePose(int yaw, int pitch) {
+  poseX_ = std::clamp(yaw / 6, -8, 8);
+  poseY_ = std::clamp(pitch / 5, -8, 8);
 }
 
 void PresentationController::setMotionIntensity(uint8_t intensity) {
@@ -79,6 +159,20 @@ void PresentationController::requestPortrait(uint32_t nowMs,
 }
 
 void PresentationController::update(uint32_t nowMs) {
+  snapshot_.speakingWithEmphasis = hasAccent_ && nowMs - accentAt_ < 200;
+  if (nowMs - lastMotionFrameAt_ >= 30) {
+    lastMotionFrameAt_ = nowMs;
+    int nod = 0;
+    const uint32_t nodAge = nowMs - listeningNodAt_;
+    if (snapshot_.state == DeviceState::Listening && acknowledgedPause_ && nodAge < 270)
+      nod = (6 * std::min(nodAge, 270u - nodAge)) / 135;
+    const int smoothY = (poseY_ - snapshot_.faceY) / 2;
+    const int smoothX = (poseX_ - snapshot_.faceX) / 2;
+    const int y = smoothY ? snapshot_.faceY + smoothY : poseY_;
+    snapshot_.faceY = nod ? nod : y;
+    snapshot_.faceX = smoothX ? snapshot_.faceX + smoothX : poseX_;
+    snapshot_.mouthAperture = (targetAperture_ * 3 + snapshot_.mouthAperture + 2) / 4;
+  }
   if (portraitRequested_ && snapshot_.displayMode == DisplayMode::Hybrid &&
       static_cast<int32_t>(nowMs - portraitVisibleUntil_) >= 0) {
     portraitRequested_ = false;
@@ -111,7 +205,7 @@ bool PresentationController::shouldRenderPortrait(uint32_t nowMs) const {
   }
   if (snapshot_.displayMode == DisplayMode::CharacterArt)
     return true;
-  return portraitRequested_ &&
+  return snapshot_.state != DeviceState::Listening && portraitRequested_ &&
          static_cast<int32_t>(portraitVisibleUntil_ - nowMs) > 0;
 }
 

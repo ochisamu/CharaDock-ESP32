@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "charadock/audio_playback.hpp"
+#include <utility>
 
 #include <algorithm>
 #include <cstring>
@@ -28,7 +29,7 @@ AudioBufferResult PcmPlaybackBuffer::begin(const AudioStreamConfig &config,
       config.bitsPerSample != 16 || !config.signedSamples ||
       !config.littleEndian || config.prebufferMs < kMinimumPrebufferMs ||
       config.prebufferMs > kMaximumPrebufferMs ||
-      requestedPrebuffer > capacity_) {
+      requestedPrebuffer > capacity_ || config.expectedSamples > capacity_) {
     return AudioBufferResult::InvalidFormat;
   }
   if (hasBeginSequence_ && beginSequence_ == sequence) {
@@ -60,6 +61,9 @@ AudioBufferResult PcmPlaybackBuffer::appendChunk(uint16_t sequence,
   if (producerEnded_)
     return AudioBufferResult::AlreadyEnded;
   const size_t sampleCount = byteCount / sizeof(int16_t);
+  if (config_.expectedSamples &&
+      sampleCount > config_.expectedSamples - buffered_)
+    return AudioBufferResult::InvalidChunk;
   if (sampleCount > freeSamples())
     return AudioBufferResult::BufferFull;
   for (size_t index = 0; index < sampleCount; ++index) {
@@ -81,6 +85,8 @@ AudioBufferResult PcmPlaybackBuffer::end(uint16_t sequence) {
     return AudioBufferResult::SessionNotActive;
   if (producerEnded_)
     return AudioBufferResult::AlreadyEnded;
+  if (config_.expectedSamples && buffered_ != config_.expectedSamples)
+    return AudioBufferResult::InvalidChunk;
   producerEnded_ = true;
   hasEndSequence_ = true;
   endSequence_ = sequence;
@@ -98,6 +104,16 @@ void PcmPlaybackBuffer::stop() {
   ++generation_;
 }
 
+bool PcmPlaybackBuffer::adoptStaged(PcmPlaybackBuffer &staged) {
+  if (active() || !staged.active() || !staged.producerEnded_ || !staged.buffered_)
+    return false;
+  const uint32_t nextGeneration = generation_ + 1;
+  std::swap(*this, staged);
+  generation_ = nextGeneration;
+  staged.stop();
+  return true;
+}
+
 size_t PcmPlaybackBuffer::prepareSamples(int16_t *destination,
                                          size_t maximumSamples) {
   if (!destination || maximumSamples == 0)
@@ -107,7 +123,8 @@ size_t PcmPlaybackBuffer::prepareSamples(int16_t *destination,
       phase_ = AudioPlaybackPhase::Finished;
       return 0;
     }
-    if (!producerEnded_ && buffered_ < prebufferSamples())
+    if (!producerEnded_ &&
+        (config_.expectedSamples || buffered_ < prebufferSamples()))
       return 0;
     phase_ = producerEnded_ ? AudioPlaybackPhase::Draining
                             : AudioPlaybackPhase::Playing;
@@ -162,7 +179,11 @@ size_t PcmPlaybackBuffer::freeSamples() const { return capacity_ - buffered_; }
 size_t PcmPlaybackBuffer::capacitySamples() const { return capacity_; }
 
 size_t PcmPlaybackBuffer::prebufferSamples() const {
-  return static_cast<size_t>(config_.sampleRate) * config_.prebufferMs / 1000;
+  const uint32_t recoveryMs = underrunCount_
+      ? 440u << std::min(underrunCount_ - 1, 3u)
+      : 0;
+  const auto refillMs = std::max<uint32_t>(config_.prebufferMs, recoveryMs);
+  return std::min(capacity_, static_cast<size_t>(config_.sampleRate) * refillMs / 1000);
 }
 
 uint32_t PcmPlaybackBuffer::generation() const { return generation_; }
@@ -177,7 +198,9 @@ bool PcmPlaybackBuffer::configsEqual(const AudioStreamConfig &left,
          left.bitsPerSample == right.bitsPerSample &&
          left.volume == right.volume &&
          left.signedSamples == right.signedSamples &&
-         left.littleEndian == right.littleEndian;
+         left.littleEndian == right.littleEndian &&
+         left.imaAdpcm == right.imaAdpcm &&
+         left.expectedSamples == right.expectedSamples;
 }
 
 uint32_t PcmPlaybackBuffer::fingerprint(const uint8_t *bytes, size_t length) {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace charadock {
@@ -37,10 +38,12 @@ enum class MotionProfile : uint8_t {
   Custom = 4,
 };
 
+enum class FaceDetectionStatus : uint8_t { Hidden, Searching, Detected };
+
 struct Theme {
-  uint32_t primary = 0xfff5df;
-  uint32_t secondary = 0x171513;
-  uint32_t accent = 0xd99a24;
+  uint32_t primary = 0x101619;
+  uint32_t secondary = 0xfff4e4;
+  uint32_t accent = 0xf0a086;
 };
 
 struct PresentationSnapshot {
@@ -50,10 +53,32 @@ struct PresentationSnapshot {
   MotionProfile motionProfile = MotionProfile::Energetic;
   Theme theme{};
   uint8_t mouthLevel = 0;
+  uint8_t mouthAperture = 0;
+  bool listeningToVoice = false;
+  bool speakingWithEmphasis = false;
+  int8_t faceX = 0;
+  int8_t attentionX = 0;
+  int8_t faceY = 0;
   uint8_t motionIntensity = 70;
   bool eyesClosed = false;
   bool artworkAllowed = true;
+  bool privacyMuted = false;
+  const char *connection = "";
   bool portraitAvailable = false;
+  FaceDetectionStatus faceDetection = FaceDetectionStatus::Hidden;
+
+  void showFaceDetection(bool cameraConversationAvailable, bool recentFace) {
+    if (!cameraConversationAvailable || privacyMuted || state != DeviceState::Idle) {
+      faceDetection = FaceDetectionStatus::Hidden;
+      return;
+    }
+    faceDetection = recentFace ? FaceDetectionStatus::Detected : FaceDetectionStatus::Searching;
+  }
+};
+
+struct SpeechCues {
+  bool emphasized = false;
+  bool moveHead = false;
 };
 
 class PresentationController {
@@ -66,6 +91,10 @@ public:
   void setMotionProfile(MotionProfile profile);
   void setTheme(const Theme &theme);
   void setMouthLevel(uint8_t level);
+  void observeMicrophone(const int16_t *samples, size_t count, uint32_t nowMs);
+  SpeechCues observeSpeech(uint16_t rms, uint32_t nowMs);
+  void closeSpeech();
+  void setFacePose(int yaw, int pitch);
   void setMotionIntensity(uint8_t intensity);
   void setArtworkAllowed(bool allowed);
   void setPortraitAvailable(bool available);
@@ -83,6 +112,22 @@ private:
   void scheduleBlink(uint32_t nowMs);
 
   PresentationSnapshot snapshot_{};
+  uint16_t micFloor_ = 64;
+  uint8_t voicedMicBlocks_ = 0;
+  uint8_t quietMicBlocks_ = 0;
+  bool acknowledgedPause_ = false;
+  uint32_t listeningNodAt_ = 0;
+  uint16_t speechBaseline_ = 0;
+  uint8_t observedSpeechBlocks_ = 0;
+  uint32_t lastVoicedSpeechAt_ = 0;
+  uint32_t lastSpeechMotionAt_ = 0;
+  bool hasSpeechMotion_ = false;
+  uint8_t targetAperture_ = 0;
+  uint32_t accentAt_ = 0;
+  bool hasAccent_ = false;
+  int8_t poseX_ = 0;
+  int8_t poseY_ = 0;
+  uint32_t lastMotionFrameAt_ = 0;
   uint32_t randomState_;
   uint32_t stateChangedAt_ = 0;
   uint32_t nextBlinkAt_ = 0;

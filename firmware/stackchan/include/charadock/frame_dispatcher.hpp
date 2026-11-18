@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -36,9 +37,13 @@ struct PresentationSettings {
 
 class FrameDispatcher {
 public:
+  // 16-bit PCM bytes after decoding a compressed AudioChunk.
+  static constexpr size_t kMaxAdpcmPcmBytes = 12 * 1024;
+
   FrameDispatcher(PresentationController &presentation,
                   PortraitCache &portraitCache,
-                  PcmPlaybackBuffer *audioPlayback = nullptr);
+                  PcmPlaybackBuffer *audioPlayback = nullptr,
+                  PcmPlaybackBuffer *stagedPlayback = nullptr);
 
   FrameApplyOutcome apply(const protocol::Frame &frame, uint32_t nowMs);
 
@@ -46,6 +51,8 @@ private:
   PresentationController &presentation_;
   PortraitCache &portraitCache_;
   PcmPlaybackBuffer *audioPlayback_;
+  PcmPlaybackBuffer *stagedPlayback_;
+  std::array<uint8_t, kMaxAdpcmPcmBytes> decodedPcm_;
 };
 
 // Binary payload used by AssetMeta. This helper is shared with host-side tests

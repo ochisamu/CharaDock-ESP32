@@ -199,7 +199,12 @@ void WifiConnection::update(uint32_t nowMs) {
 std::vector<protocol::Frame> WifiConnection::poll() {
   if (!socketConnected())
     return {};
-  return transport_.poll();
+  // Read up to a full-sized protocol frame without waiting for missing bytes.
+  // The decoder also accepts multiple smaller audio frames in one read.
+  const int count = client_.read(receiveBuffer_, sizeof(receiveBuffer_));
+  if (count <= 0)
+    return {};
+  return transport_.receive(receiveBuffer_, static_cast<size_t>(count));
 }
 
 UsbTransport &WifiConnection::transport() { return transport_; }

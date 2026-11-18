@@ -10,10 +10,21 @@
 
 #include "charadock/audio_playback.hpp"
 #include "charadock/frame_dispatcher.hpp"
+#include "charadock/idle_backlight.hpp"
+#include "charadock/hands_free_voice.hpp"
+#include "charadock/hardware.hpp"
+
 #include "charadock/mouth_envelope.hpp"
+#include "charadock/head_gesture.hpp"
 #include "charadock/portrait_cache.hpp"
 #include "charadock/presentation.hpp"
+#include "charadock/quick_settings.hpp"
+#include "charadock/face_tracking.hpp"
 #include "charadock/protocol_v2.hpp"
+
+static_assert(charadock::HardwareController::voiceLedColor(false, false) == 0);
+static_assert(charadock::HardwareController::voiceLedColor(true, false) == 0x0b4474);
+static_assert(charadock::HardwareController::voiceLedColor(false, true) == 0x4d2870);
 
 using charadock::PortraitCache;
 using charadock::PortraitCacheResult;
@@ -63,6 +74,15 @@ void invalidFrameRecoversToTheNextMagic() {
   assert(frames.size() == 1);
   assert(frames[0].type == FrameType::MouthLevel);
   assert(decoder.rejectedFrames() >= 1);
+}
+
+void usbStreamRecoversATruncatedAudioFrameOnRetry() {
+  const auto wire = charadock::protocol::encodeFrame(Frame{FrameType::AudioChunk, 23, pcmBytes(1024)});
+  Decoder decoder;
+  assert(decoder.push(wire.data(), wire.size() - 128).empty());
+  const auto frames = decoder.push(wire.data(), wire.size());
+  assert(frames.size() == 1 && frames[0].type == FrameType::AudioChunk && frames[0].sequence == 23);
+  assert(frames[0].payload == pcmBytes(1024));
 }
 
 void presentationBoundsMouthAndSchedulesNaturalBlink() {
@@ -293,6 +313,11 @@ void frameDispatcherAppliesIdempotentAudioFrames() {
   assert(outcome.result == charadock::FrameApplyResult::Applied);
   assert(audio.phase() == charadock::AudioPlaybackPhase::Stopped);
 
+  assert(dispatcher.apply({FrameType::AudioStop, 303, {1}}, 1031).result ==
+         charadock::FrameApplyResult::Applied);
+  assert(dispatcher.apply({FrameType::AudioStop, 303, {2}}, 1032).result ==
+         charadock::FrameApplyResult::InvalidPayload);
+
   auto unsupported = config;
   unsupported.sampleRate = 24000;
   outcome = dispatcher.apply(
@@ -413,12 +438,19 @@ void audioBufferRebuffersOnUnderrunAndDrainsShortTail() {
   assert(audio.phase() == charadock::AudioPlaybackPhase::Buffering);
   assert(audio.underrunCount() == 1);
 
+  const auto refill = pcmBytes(1280, -20);
+  assert(audio.appendChunk(202, refill.data(), refill.size()) ==
+         charadock::AudioBufferResult::Ok);
+  assert(audio.prebufferSamples() == storage.size());
+  assert(audio.prepareSamples(output.data(), output.size()) == 0);
   const auto tail = pcmBytes(160, -20);
-  assert(audio.appendChunk(202, tail.data(), tail.size()) ==
+  assert(audio.appendChunk(203, tail.data(), tail.size()) ==
          charadock::AudioBufferResult::Ok);
   assert(audio.prepareSamples(output.data(), output.size()) == 0);
-  assert(audio.end(203) == charadock::AudioBufferResult::Ok);
-  assert(audio.end(203) == charadock::AudioBufferResult::Duplicate);
+  assert(audio.end(204) == charadock::AudioBufferResult::Ok);
+  assert(audio.end(204) == charadock::AudioBufferResult::Duplicate);
+  assert(audio.prepareSamples(output.data(), output.size()) == 1280);
+  assert(audio.commitSamples(1280));
   assert(audio.prepareSamples(output.data(), output.size()) == 160);
   assert(audio.commitSamples(160));
   assert(audio.prepareSamples(output.data(), output.size()) == 0);
@@ -451,10 +483,378 @@ void audioBufferRejectsUnsupportedOrOversizedInputAtomically() {
          charadock::AudioBufferResult::InvalidChunk);
 }
 
+void completeAudioWaitsForVerifiedEnd() {
+  using namespace charadock;
+  std::vector<int16_t> storage(4096);
+  PcmPlaybackBuffer audio;
+  assert(audio.attach(storage.data(), storage.size()));
+  AudioStreamConfig config;
+  config.prebufferMs = 80;
+  config.expectedSamples = 3400;
+  const auto payload = encodeAudioStreamConfigPayload(config);
+  assert(payload.size() == 15);
+  AudioStreamConfig decoded;
+  assert(decodeAudioStreamConfigPayload(payload, decoded));
+  assert(decoded.expectedSamples == 3400);
+  auto missingLength = payload;
+  missingLength[11] = missingLength[12] = 0;
+  assert(!decodeAudioStreamConfigPayload(missingLength, decoded));
+
+  auto oversized = config;
+  oversized.expectedSamples = storage.size() + 1;
+  assert(audio.begin(oversized, 1) == AudioBufferResult::InvalidFormat);
+  assert(audio.begin(config, 1) == AudioBufferResult::Ok);
+  assert(audio.begin(oversized, 1) == AudioBufferResult::InvalidFormat);
+  const auto part = pcmBytes(1700, -1500);
+  std::vector<int16_t> out(config.expectedSamples);
+  assert(audio.appendChunk(2, part.data(), part.size()) == AudioBufferResult::Ok);
+  assert(audio.prepareSamples(out.data(), out.size()) == 0);
+  assert(audio.end(3) == AudioBufferResult::InvalidChunk);
+  assert(audio.appendChunk(4, part.data(), part.size()) == AudioBufferResult::Ok);
+  assert(audio.appendChunk(4, part.data(), part.size()) == AudioBufferResult::Duplicate);
+  assert(audio.appendChunk(5, part.data(), part.size()) == AudioBufferResult::InvalidChunk);
+  assert(audio.prepareSamples(out.data(), out.size()) == 0);
+  assert(audio.end(6) == AudioBufferResult::Ok);
+  assert(audio.prepareSamples(out.data(), out.size()) == config.expectedSamples);
+  assert(out[0] == -1500 && out[1699] == 199 && out[1700] == -1500);
+  assert(audio.commitSamples(out.size()));
+  assert(audio.prepareSamples(out.data(), out.size()) == 0);
+  assert(audio.phase() == AudioPlaybackPhase::Finished);
+  assert(audio.underrunCount() == 0);
+}
+
+void imaAdpcmFramesDecodeToOrderedPcm() {
+  using namespace charadock;
+  using protocol::FrameType;
+  std::vector<int16_t> storage(4096);
+  PcmPlaybackBuffer audio;
+  assert(audio.attach(storage.data(), storage.size()));
+  PresentationController presentation;
+  PortraitCache portrait;
+  FrameDispatcher dispatcher(presentation, portrait, &audio);
+  AudioStreamConfig config;
+  config.imaAdpcm = true;
+  config.expectedSamples = 4;
+  assert(dispatcher.apply({FrameType::AudioBegin, 1, encodeAudioStreamConfigPayload(config)}, 0).audioResult == AudioBufferResult::Ok);
+  const std::vector<uint8_t> encoded = {4, 0, 100, 0, 0, 0xb7, 0x04};
+  auto malformed = encoded;
+  malformed[4] = 89;
+  assert(dispatcher.apply({FrameType::AudioChunk, 2, malformed}, 0).audioResult == AudioBufferResult::InvalidChunk);
+  assert(audio.bufferedSamples() == 0);
+  assert(dispatcher.apply({FrameType::AudioChunk, 3, encoded}, 0).audioResult == AudioBufferResult::Ok);
+  assert(dispatcher.apply({FrameType::AudioChunk, 3, encoded}, 0).audioResult == AudioBufferResult::Duplicate);
+  assert(dispatcher.apply({FrameType::AudioEnd, 4, {}}, 0).audioResult == AudioBufferResult::Ok);
+  int16_t output[4]{};
+  assert(audio.prepareSamples(output, 4) == 4);
+  assert(output[0] == 100 && output[1] == 111 && output[2] == 97 && output[3] == 112);
+
+  constexpr size_t largeSamples = FrameDispatcher::kMaxAdpcmPcmBytes / sizeof(int16_t);
+  storage.resize(largeSamples);
+  assert(audio.attach(storage.data(), storage.size()));
+  config.expectedSamples = largeSamples;
+  assert(dispatcher.apply({FrameType::AudioBegin, 5, encodeAudioStreamConfigPayload(config)}, 0).audioResult == AudioBufferResult::Ok);
+  std::vector<uint8_t> large(5 + largeSamples / 2);
+  large[0] = (largeSamples + 1) & 0xff;
+  large[1] = (largeSamples + 1) >> 8;
+  assert(dispatcher.apply({FrameType::AudioChunk, 6, large}, 0).audioResult == AudioBufferResult::InvalidChunk);
+  large[0] = largeSamples & 0xff;
+  large[1] = largeSamples >> 8;
+  assert(dispatcher.apply({FrameType::AudioChunk, 7, large}, 0).audioResult == AudioBufferResult::Ok);
+  assert(dispatcher.apply({FrameType::AudioEnd, 8, {}}, 0).audioResult == AudioBufferResult::Ok);
+  assert(audio.bufferedSamples() == largeSamples);
+}
+
+void listensBeforeShowingOneAcknowledgement() {
+  using namespace charadock;
+  PresentationController presentation;
+  presentation.setState(DeviceState::Listening, 0);
+  std::array<int16_t, 320> voice{};
+  voice.fill(900);
+  std::array<int16_t, 320> silence{};
+  presentation.observeMicrophone(voice.data(), voice.size(), 20);
+  for (uint32_t at = 40; at <= 220; at += 20)
+    presentation.observeMicrophone(silence.data(), silence.size(), at);
+  presentation.update(300);
+  assert(!presentation.snapshot().listeningToVoice && presentation.snapshot().faceY == 0);
+  for (uint32_t at = 320; at <= 780; at += 20)
+    presentation.observeMicrophone(voice.data(), voice.size(), at);
+  assert(presentation.snapshot().listeningToVoice);
+  for (uint32_t at = 800; at <= 960; at += 20)
+    presentation.observeMicrophone(silence.data(), silence.size(), at);
+  presentation.update(1095);
+  assert(presentation.snapshot().faceY == 6);
+  for (uint32_t at = 1100; at <= 1560; at += 20)
+    presentation.observeMicrophone(voice.data(), voice.size(), at);
+  for (uint32_t at = 1580; at <= 1740; at += 20)
+    presentation.observeMicrophone(silence.data(), silence.size(), at);
+  presentation.update(1800);
+  assert(presentation.snapshot().faceY < 6);
+  presentation.setState(DeviceState::Thinking, 1830);
+  presentation.observeMicrophone(voice.data(), voice.size(), 1840);
+  assert(!presentation.snapshot().listeningToVoice);
+}
+
+void speakingPerformanceTracksActualLevelAndCancelsCleanly() {
+  using namespace charadock;
+  PresentationController presentation;
+  for (uint32_t at = 40; at <= 160; at += 40) {
+    const auto cues = presentation.observeSpeech(640, at);
+    assert(!cues.emphasized && cues.moveHead == (at == 160));
+  }
+  presentation.update(160);
+  const auto quiet = presentation.snapshot().mouthAperture;
+  assert(quiet > 0);
+  const auto accent = presentation.observeSpeech(2500, 200);
+  assert(accent.emphasized && !accent.moveHead);
+  presentation.setFacePose(-40, 17);
+  presentation.update(200);
+  assert(presentation.snapshot().mouthAperture > quiet);
+  assert(presentation.snapshot().speakingWithEmphasis && presentation.snapshot().faceX < 0);
+  const auto nearby = presentation.observeSpeech(3300, 240);
+  assert(!nearby.emphasized && !nearby.moveHead);
+  for (uint32_t at = 280; at <= 2440; at += 40)
+    assert(!presentation.observeSpeech(850, at).moveHead);
+  for (uint32_t at = 2480; at <= 2680; at += 40)
+    assert(!presentation.observeSpeech(120, at).moveHead);
+  assert(presentation.observeSpeech(850, 2720).moveHead);
+  presentation.closeSpeech();
+  presentation.setFacePose(0, 0);
+  presentation.update(400);
+  presentation.update(440);
+  presentation.update(480);
+  assert(!presentation.snapshot().speakingWithEmphasis && presentation.snapshot().mouthAperture == 0);
+  assert(presentation.snapshot().faceX == 0);
+}
+
+static void testHeadGestures() {
+  using namespace charadock;
+  HeadGesturePlayer player;
+  HeadPose pose{};
+  assert(!player.next(0, true, 100, pose));
+  assert(player.request(HeadGesture::Nod, 100));
+  assert(!player.next(200, false, 100, pose));
+  assert(player.next(300, true, 70, pose));
+  assert(pose.yaw == 0 && pose.pitch == 47);
+  assert(!player.request(HeadGesture::Ponder, 320));
+  assert(!player.next(500, true, 100, pose));
+  assert(player.next(950, true, 100, pose) && pose.yaw == 0 && pose.pitch == 0);
+  assert(!player.next(1370, true, 100, pose));
+  assert(player.request(HeadGesture::Ponder, 1390));
+  assert(!player.next(2190, true, 100, pose)); // Expired without speech.
+  assert(player.request(HeadGesture::Waiting, 2300));
+  assert(player.next(2300, false, 100, pose) && pose.pitch == 44);
+  assert(player.cancel());
+  assert(!player.next(2600, true, 100, pose));
+  assert(player.request(HeadGesture::Delight, 2700));
+  assert(!player.next(2750, true, 0, pose));
+  assert(player.request(HeadGesture::Accent, 2900));
+  assert(player.next(2900, true, 100, pose) && pose.pitch == 75);
+  assert(player.request(HeadGesture::Ponder, 2920));
+  assert(!player.next(3000, false, 100, pose));
+  assert(player.next(3720, false, 100, pose) && pose.pitch == 0);
+}
+
+void explicitVoiceMotionCanMoveWhileSilentAndReturnsToCenter() {
+  using namespace charadock;
+  HeadGesturePlayer player;
+  HeadPose pose{};
+  assert(player.request(HeadGesture::Sweep, 100));
+  assert(player.voiceMotionActive());
+  assert(!player.next(99, false, 100, pose));
+  assert(player.next(100, false, 70, pose) && pose.yaw == 175);
+  assert(!player.next(1000, false, 70, pose));
+  assert(player.next(1600, false, 70, pose) && pose.yaw == -175);
+  assert(player.next(3100, false, 70, pose) && pose.yaw == 0);
+  assert(player.voiceMotionActive());
+  assert(player.request(HeadGesture::VoiceNod, 3200));
+  assert(player.next(3200, false, 70, pose) && pose.pitch > 0);
+  const HeadPose expected[] = {{0, 210, 350}, {0, -210, 335}, {0, -180, 390}, {-165, 65, 350},
+                              {-220, 210, 350}, {220, 210, 350}, {-220, -210, 335}, {220, -210, 335}};
+  for (uint8_t id = 13; id <= kLastVoiceMotion; ++id) {
+    HeadGesturePlayer next;
+    assert(next.request(static_cast<HeadGesture>(id), 100));
+    assert(next.next(100, false, 100, pose));
+    const auto &target = expected[id - 13];
+    assert(pose.yaw == target.yaw && pose.pitch == target.pitch && pose.speed == target.speed);
+    assert(next.next(1800, false, 100, pose) && pose.yaw == 0 && pose.pitch == 0);
+  }
+}
+
+void quickSettingsProtectsTheDefaultFaceAndPrivacyControl() {
+  using charadock::QuickAction;
+  charadock::QuickSettingsTouch touch;
+  const auto gesture = [&](int x, int y, int endX, int endY, bool open,
+                           bool preview = false, bool asleep = false) {
+    assert(touch.update(true, x, y, open, preview, asleep) == QuickAction::None);
+    assert(touch.update(true, endX, endY, open, preview, false) == QuickAction::None);
+    return touch.update(false, 0, 0, open, preview, false);
+  };
+  assert(gesture(180, 220, 171, 152, false) == QuickAction::Open);
+  assert(gesture(180, 220, 171, 152, false, false, true) == QuickAction::None);
+  assert(gesture(180, 170, 171, 102, false) == QuickAction::None);
+  assert(gesture(170, 231, 255, 110, false) == QuickAction::None);
+  assert(gesture(155, 78, 155, 78, false) == QuickAction::None);
+  assert(gesture(155, 78, 155, 78, true) == QuickAction::Quieter);
+  assert(gesture(279, 78, 279, 78, true) == QuickAction::Louder);
+  assert(gesture(90, 130, 90, 130, true) == QuickAction::Tracking);
+  assert(gesture(90, 200, 90, 200, true) == QuickAction::Preview);
+  assert(gesture(310, 17, 310, 17, true) == QuickAction::None);
+  assert(gesture(310, 17, 310, 17, false, true) == QuickAction::None);
+  assert(gesture(90, 140, 90, 140, false, true) == QuickAction::PreviewBack);
+  assert(gesture(160, 100, 170, 190, true) == QuickAction::Close);
+  assert(gesture(47, 24, 47, 24, true) == QuickAction::Close);
+}
+
+void faceTrackingMovesOnlyOnFreshOffCenterDetections() {
+  charadock::FaceTracking tracking;
+  tracking.update(500, 500, 17, -13, true);
+  assert(tracking.yaw() == 0 && tracking.pitch() == 0);
+  tracking.update(900, 900, 140, -95, true);
+  assert(tracking.yaw() == -13 && tracking.pitch() == 9);
+  tracking.update(1100, 900, 140, -95, true);
+  assert(tracking.yaw() == -13 && tracking.pitch() == 9);
+  for (uint32_t at = 1300; at <= 6500; at += 400)
+    tracking.update(at, at, 140, -95, true);
+  assert(tracking.yaw() == -120 && tracking.pitch() == 50);
+  tracking.update(8299, 0, 0, 0, true);
+  assert(tracking.yaw() == -120 && tracking.pitch() == 50);
+  tracking.update(8300, 0, 0, 0, true);
+  assert(tracking.yaw() == 0 && tracking.pitch() == 0);
+  tracking.update(8500, 8500, -120, 0, true);
+  assert(tracking.yaw() == 14);
+  tracking.update(8600, 8500, -120, 0, false);
+  assert(tracking.yaw() == 0 && tracking.pitch() == 0);
+}
+
+void idleDisplayDimsSleepsAndWakesWithoutASecondTap() {
+  using charadock::IdleBacklight;
+  IdleBacklight backlight;
+  backlight.noteActivity(100);
+  assert(backlight.update(30099, false) == IdleBacklight::kActiveBrightness);
+  assert(backlight.update(30100, false) == 104);
+  assert(backlight.update(30220, false) == 80);
+  assert(backlight.update(30460, false) == IdleBacklight::kDimBrightness);
+  assert(backlight.update(300099, false) == IdleBacklight::kDimBrightness);
+  assert(backlight.update(300100, false) == 0);
+  assert(backlight.update(101, false) == 0); // Still off after timer rollover.
+  assert(backlight.update(300101, true) == IdleBacklight::kActiveBrightness);
+  assert(backlight.update(720000, true) == IdleBacklight::kActiveBrightness);
+  assert(backlight.update(749999, false) == IdleBacklight::kActiveBrightness);
+
+  backlight.noteActivity(0xfffffff0);
+  assert(backlight.update(15, false) == IdleBacklight::kActiveBrightness);
+  assert(backlight.update(31000, false) == IdleBacklight::kDimBrightness);
+  backlight.noteActivity(32000);
+  assert(backlight.update(32000, false) == IdleBacklight::kActiveBrightness);
+}
+
+void handsFreeRearmKeepsItsNoiseFloor() {
+  charadock::HandsFreeVoice vad;
+  for (int i = 0; i < 20; ++i) assert(!vad.observe(100, 120, false));
+  assert(vad.calibration() == 0 && vad.floor() == 100);
+  vad.rearm();
+  for (int i = 0; i < 5; ++i) assert(!vad.observe(450, 120, false));
+  assert(vad.observe(450, 120, false));
+  assert(vad.floor() == 100);
+}
+
+void handsFreeIgnoresCalibrationAndShortNoiseThenEndsAtPause() {
+  charadock::HandsFreeVoice vad;
+  const int16_t silenceWithOffset[] = {2100, 2100, 2100, 2100};
+  const int16_t voiceWithOffset[] = {1900, 2300, 1900, 2300};
+  assert(vad.centeredRms(silenceWithOffset, 4) == 0);
+  assert(vad.centeredRms(voiceWithOffset, 4) == 200);
+  for (int index = 0; index < 5; ++index) assert(!vad.observe(0, 120, false));
+  assert(!vad.observe(0, 120, false));
+  for (int index = 0; index < 14; ++index) assert(!vad.observe(270, 120, false));
+  assert(vad.floor() == 270);
+  for (int index = 0; index < 9; ++index) assert(!vad.observe(290, 120, false));
+  assert(!vad.observe(650, 120, false));
+  assert(!vad.observe(650, 120, false));
+  assert(!vad.observe(80, 120, false));
+  for (int i = 0; i < 2; ++i) assert(!vad.observe(650, 120, false));
+  assert(vad.observe(650, 120, false));
+  for (int i = 0; i < 24; ++i) assert(!vad.observe(40, 120, true));
+  assert(!vad.observe(650, 120, true));
+  for (int i = 0; i < 24; ++i) assert(!vad.observe(40, 120, true));
+  assert(vad.observe(40, 120, true));
+}
+
+void stagesOneCompletePhraseWithoutReplacingCurrentAudio() {
+  using namespace charadock;
+  using protocol::FrameType;
+  PcmPlaybackBuffer active, staged;
+  PresentationController presentation;
+  PortraitCache portrait;
+  FrameDispatcher dispatcher(presentation, portrait, &active, &staged);
+  AudioStreamConfig config;
+  config.prebufferMs = 80;
+  config.sampleRate = 16000;
+  config.expectedSamples = 1;
+  // At least 80 ms of storage is needed even for a short complete phrase.
+  std::vector<int16_t> current(1280), next(1280);
+  assert(active.attach(current.data(), current.size()));
+  assert(staged.attach(next.data(), next.size()));
+  const auto begin = encodeAudioStreamConfigPayload(config);
+  assert(dispatcher.apply({FrameType::AudioBegin, 1, begin}, 0).audioResult == AudioBufferResult::Ok);
+  assert(dispatcher.apply({FrameType::AudioChunk, 2, {11, 0}}, 0).audioResult == AudioBufferResult::Ok);
+  assert(dispatcher.apply({FrameType::AudioEnd, 3, {}}, 0).audioResult == AudioBufferResult::Ok);
+  assert(dispatcher.apply({FrameType::AudioStageBegin, 4, begin}, 0).audioResult == AudioBufferResult::Ok);
+  assert(dispatcher.apply({FrameType::AudioStageEnd, 5, {}}, 0).audioResult == AudioBufferResult::InvalidChunk);
+  assert(dispatcher.apply({FrameType::AudioStageChunk, 6, {22, 0}}, 0).audioResult == AudioBufferResult::Ok);
+  assert(dispatcher.apply({FrameType::AudioStageEnd, 7, {}}, 0).audioResult == AudioBufferResult::Ok);
+  assert(!active.adoptStaged(staged));
+  int16_t sample = 0;
+  assert(active.prepareSamples(&sample, 1) == 1 && sample == 11);
+  assert(active.commitSamples(1));
+  assert(active.prepareSamples(&sample, 1) == 0);
+  assert(active.adoptStaged(staged));
+  assert(active.beginSequence() == 4);
+  assert(active.prepareSamples(&sample, 1) == 1 && sample == 22);
+  dispatcher.apply({FrameType::AudioStop, 8, {}}, 0);
+  assert(!active.active() && !staged.active());
+}
+
+static void faceDetectionBadgeUsesCurrentModeAndFacePresence() {
+  using namespace charadock;
+  PresentationSnapshot snapshot;
+  snapshot.state = DeviceState::Idle;
+  snapshot.showFaceDetection(true, false);
+  assert(snapshot.faceDetection == FaceDetectionStatus::Searching);
+  snapshot.showFaceDetection(true, true);
+  assert(snapshot.faceDetection == FaceDetectionStatus::Detected);
+  snapshot.showFaceDetection(true, false);
+  assert(snapshot.faceDetection == FaceDetectionStatus::Searching);
+  snapshot.showFaceDetection(false, true);
+  assert(snapshot.faceDetection == FaceDetectionStatus::Hidden);
+  snapshot.privacyMuted = true;
+  snapshot.showFaceDetection(true, true);
+  assert(snapshot.faceDetection == FaceDetectionStatus::Hidden);
+  snapshot.privacyMuted = false;
+  for (auto state : {DeviceState::Listening, DeviceState::Thinking, DeviceState::Speaking,
+                     DeviceState::Error, DeviceState::Connecting}) {
+    snapshot.state = state;
+    snapshot.showFaceDetection(true, true);
+    assert(snapshot.faceDetection == FaceDetectionStatus::Hidden);
+  }
+}
+
 int main() {
+  faceDetectionBadgeUsesCurrentModeAndFacePresence();
+  stagesOneCompletePhraseWithoutReplacingCurrentAudio();
+  handsFreeRearmKeepsItsNoiseFloor();
+  handsFreeIgnoresCalibrationAndShortNoiseThenEndsAtPause();
+  explicitVoiceMotionCanMoveWhileSilentAndReturnsToCenter();
+  quickSettingsProtectsTheDefaultFaceAndPrivacyControl();
+  faceTrackingMovesOnlyOnFreshOffCenterDetections();
+  idleDisplayDimsSleepsAndWakesWithoutASecondTap();
+  testHeadGestures();
+  listensBeforeShowingOneAcknowledgement();
+  speakingPerformanceTracksActualLevelAndCancelsCleanly();
   frameRoundTripsAcrossFragments();
   frameEncodingMatchesTheUsbToolKnownVector();
   invalidFrameRecoversToTheNextMagic();
+  usbStreamRecoversATruncatedAudioFrameOnRetry();
   presentationBoundsMouthAndSchedulesNaturalBlink();
   artworkPolicyFallsBackToNativeFace();
   portraitCacheCommitsAtomically();
@@ -465,6 +865,8 @@ int main() {
   audioBufferPrebuffersAndCommitsOnlyAcceptedSamples();
   audioBufferRebuffersOnUnderrunAndDrainsShortTail();
   audioBufferRejectsUnsupportedOrOversizedInputAtomically();
+  completeAudioWaitsForVerifiedEnd();
+  imaAdpcmFramesDecodeToOrderedPcm();
   std::cout
       << "StackChan protocol/presentation/cache/envelope/audio tests passed\n";
   return 0;

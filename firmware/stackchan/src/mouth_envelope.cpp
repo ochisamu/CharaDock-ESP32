@@ -8,7 +8,7 @@ namespace charadock {
 
 MouthEnvelope::MouthEnvelope(const MouthEnvelopeConfig &config)
     : config_(config) {
-  config_.minimumUpdateMs = std::max<uint16_t>(100, config_.minimumUpdateMs);
+  config_.minimumUpdateMs = std::max<uint16_t>(33, config_.minimumUpdateMs);
   config_.fullOpenRms =
       std::max<uint16_t>(config_.fullOpenRms, config_.halfOpenRms + 1);
   config_.halfCloseRms =

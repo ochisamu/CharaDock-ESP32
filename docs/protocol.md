@@ -116,7 +116,7 @@ Applying a snapshot updates theme and motion together. Disabling artwork invalid
 
 ### Protocol-v2 speaker audio
 
-The first StackChan audio route is available over physical USB serial. `AudioBegin` carries an 11-byte fixed settings snapshot:
+StackChan speaker audio works over USB serial and paired Wi-Fi. The 11-byte streaming `AudioBegin` carries the following settings:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
@@ -126,11 +126,15 @@ The first StackChan audio route is available over physical USB serial. `AudioBeg
 | 6 | 1 | Bits per sample (`16`) |
 | 7 | 1 | M5 speaker volume, 0–255 |
 | 8 | 2 | Prebuffer duration, 80–500 ms; default 200 ms |
-| 10 | 1 | Flags; bit 0 signed samples, bit 1 little-endian; both required |
+| 10 | 1 | Flags; bits 0 and 1 are required for signed little-endian PCM, bit 2 selects IMA ADPCM on the wire |
 
-`AudioChunk` contains only non-empty, even-length PCM16 little-endian bytes and is limited to the protocol's 4096-byte payload. `AudioEnd` and `AudioStop` have empty payloads. End drains all accepted samples; Stop discards them and interrupts the hardware queue immediately.
+By default, `AudioChunk` contains non-empty, even-length PCM16 little-endian bytes and is limited to the protocol's 4096-byte payload. If the device advertises `capabilities.audio.imaAdpcm`, the host can set AudioBegin flag bit 2. Each compressed chunk then contains a 16-bit sample count (at most 2048 by default), the first PCM sample as a 16-bit predictor, and an 8-bit IMA step index (0-88), followed by packed 4-bit samples, low nibble first. The unused last nibble is padding. When present, `capabilities.audio.maxAdpcmPcmBytes` reports the maximum number of decoded PCM bytes per compressed chunk. StackChan advertises 12,288 bytes (6144 samples). The encoded payload must still fit the 4096-byte protocol limit. The count includes the first sample, and complete-playback lengths and ring capacity use decoded PCM samples. `AudioEnd` and `AudioStop` have empty payloads. End drains all accepted samples; Stop discards them and interrupts the hardware queue immediately.
 
-The CoreS3 firmware uses a 16,384-sample circular buffer (about 1.024 seconds at 16 kHz), starts after the requested prebuffer, and feeds M5Unified with three rotating 20 ms blocks. A chunk is removed from the ring only after the speaker queue accepts it. If playback catches the producer, it returns to buffering instead of manufacturing silence and increments the underrun diagnostic.
+The device advertises `capabilities.audio.completePlaybackSamples` when it supports whole-segment playback. For known-length speech within that capacity, the host appends a nonzero little-endian 32-bit sample count at offset 11. The resulting 15-byte `AudioBegin` holds playback until `AudioEnd` verifies the exact sample count. The PSRAM ring normally holds 262,144 samples (about 16.4 seconds at 16 kHz). It can fall back to 16,384 samples.
+
+StackChan advertises `capabilities.audio.stagedPlaybackSamples` when it can retain one additional complete phrase. The host may send `AudioStageBegin` (0x26), `AudioStageChunk` (0x27), and `AudioStageEnd` (0x28) with the matching live-buffer payload formats after committing the current finite phrase. `AudioStageEnd` validates the count without starting the speaker. Once `AudioStatus` confirms the current hardware queue has drained, `AudioStagePlay` (0x29, empty payload) consumes the staged phrase. `AudioStop` and local interruptions discard both. `AudioPlaybackStarted` (0x2A, no payload) echoes the corresponding begin sequence when the hardware starts the first block.
+
+Streaming starts after the requested prebuffer. StackChan feeds M5Unified 40 ms blocks and removes samples from the ring only after the speaker queue accepts them. If both queues run dry during streaming, the firmware counts an underrun and raises the refill threshold after a dropout. Consecutive dropouts increase it from 440 ms to at most 3.52 seconds, subject to the ring capacity. An `AudioEnd` can still release a short tail.
 
 Audio frames are idempotent for stop-and-wait retry. The firmware remembers the eight most recent accepted chunk sequences and fingerprints. Repeating the same sequence and bytes returns an acknowledged duplicate without appending audio twice; reusing a sequence with different bytes is rejected. A full ring returns `buffer-full`, allowing the sender to wait and retry the unchanged frame. This eight-entry history also covers the planned maximum six-frame authenticated LAN window.
 

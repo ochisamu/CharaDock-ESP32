@@ -50,6 +50,7 @@ private:
   WiFiClient client_;
   WiFiUDP discovery_;
   UsbTransport transport_;
+  uint8_t receiveBuffer_[protocol::kHeaderBytes + protocol::kMaximumPayloadBytes];
   String deviceId_;
   String ssid_;
   String password_;
